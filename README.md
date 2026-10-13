@@ -136,6 +136,65 @@ Fine-tuned Ultralytics weights store their own class names, so no label file is 
 
 > ⚠️ Fine-tuning **replaces** the model's class list with your dataset's classes. If you still need `person` after training on pets, include `person` with labelled examples in the dataset.
 
+### Fine-tuning for a home security camera
+
+What works best for a fixed camera inside a house (a robot camera, a shelf
+camera), roughly in order of impact:
+
+1. **Your own camera's images.** A model trained on internet photos sees
+   your rooms from an unusual height, in dim light, at 1280×720. A few
+   hundred labelled frames from the camera itself beat thousands of
+   generic ones. Take them from **different days and times** (daylight,
+   lamps, night/IR) and distances.
+2. **Pre-label, then correct.** Let the current model draw the boxes (the
+   security camera viewer exports snapshots with the service's boxes as
+   YOLO labels), then fix them in CVAT, Label Studio or Roboflow. Correcting
+   is several times faster than drawing.
+3. **Hard examples.** Add the frames the model gets wrong: a coat on a chair
+   seen as a person, the cat in the dark, a person half out of the frame.
+   One corrected mistake teaches more than ten easy frames.
+4. **Empty frames.** Keep about 10% of frames with nothing in them (empty
+   label file). They teach the model what is *not* a person or a pet and
+   cut false alarms.
+5. **Keep the old classes.** Fine-tuning replaces the class list: train on
+   "luna" alone and the model forgets people. `training/prepare.py
+   --auto-label yolo11n.pt --keep person,cat,dog` labels the classes to keep
+   with the current model wherever you didn't (pseudo-labels), so they stay.
+6. **Split by day.** Frames of one day are near-duplicates; a random split
+   puts them in both train and validation and the score lies.
+   `training/prepare.py` validates on the newest whole days.
+7. **Transfer learning, small model first.** Start from COCO weights
+   (`--base yolo11n.pt`; `yolo11s.pt` if the server has the RAM). With
+   fewer than ~500 images freeze the backbone (`--freeze 10`); unfreeze for
+   a second run once you have more.
+8. **Augment like the camera.** `--preset indoor-camera`: strong brightness
+   and saturation changes (lights, night), left-right flips, scale; no
+   rotation and no upside-down frames, which a fixed camera never produces.
+9. **Stop early, pick the threshold from data.** `--patience 20` stops when
+   validation stops improving. The script prints the confidence where F1
+   peaks on validation: use it as `DETECT_CONFIDENCE_THRESHOLD` (and as the
+   viewer's "sure" threshold).
+10. **Version and compare.** Serve the result with a `DETECT_MODEL_VERSION`
+    (it is echoed in every answer), keep the previous weights, and compare
+    both on the same new days before switching.
+
+The whole loop:
+
+```bash
+# 1. export from the viewer (Settings -> Object detection), unzip, correct the labels
+# 2. build the dataset: split by day, keep the COCO classes with pseudo-labels
+python -m training.prepare --source export/ --out datasets/home \
+    --auto-label yolo11n.pt --keep person,cat,dog,bird
+# 3. train
+python -m training.finetune --data datasets/home/dataset.yaml \
+    --base yolo11n.pt --preset indoor-camera --freeze 10 --name home-v1
+# 4. serve the printed DETECT_MODEL_WEIGHTS / VERSION / CONFIDENCE_THRESHOLD
+```
+
+Training runs on any machine with the `ultralytics` extra; a GPU (or a free
+Colab/Kaggle notebook) makes it minutes instead of hours. The Render service
+only serves the result.
+
 ## Changing the model backend
 
 ### torchvision (Faster R-CNN, RetinaNet, FCOS, SSD)
