@@ -1,0 +1,34 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Deploy: Render dashboard -> New -> Blueprint -> select this repository.
+services:
+  - type: web
+    name: detect-image-engine
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    # The service uses ~600 MB of RAM with the default YOLO11n model, which
+    # is more than the 512 MB of the free/starter instances. Standard = 2 GB.
+    plan: standard
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: DETECT_BACKEND
+        value: ultralytics
+      - key: DETECT_TARGET_CLASSES
+        value: cat
+      - key: DETECT_CONFIDENCE_THRESHOLD
+        value: "0.25"
+      - key: DETECT_MAX_UPLOAD_BYTES
+        value: "10485760"
+      # DETECT_MODEL_WEIGHTS defaults to the model baked into the image
+      # (/models/yolo11n.pt). To serve a fine-tuned model, either copy it
+      # into the image or uncomment the disk below, upload best.pt to it
+      # and set DETECT_MODEL_WEIGHTS=/var/data/models/best.pt.
+      # - key: DETECT_MODEL_WEIGHTS
+      #   value: /var/data/models/best.pt
+      # - key: DETECT_MODEL_VERSION
+      #   value: pets-v1
+    # disk:
+    #   name: models
+    #   mountPath: /var/data
+    #   sizeGB: 1

@@ -200,6 +200,15 @@ The image uses CPU-only PyTorch. For GPU, pass `--build-arg TORCH_INDEX=https://
 
 Each process loads one model and runs one inference at a time. Scale with more replicas (or `uvicorn --workers N`; each worker loads its own copy of the model).
 
+## Deploy on Render
+
+The repo includes a Render Blueprint, [`render.yaml`](render.yaml). In the Render dashboard choose **New → Blueprint** and select this repository. Render builds the Dockerfile and checks `/health`. The container listens on the `$PORT` that Render provides.
+
+- **Plan:** `standard` (2 GB). The service uses about 600 MB of RAM with YOLO11n, so the 512 MB free/starter instances would run out of memory. Larger models need more.
+- **Region:** `oregon`. Change `region` in `render.yaml` to deploy elsewhere.
+- **Settings:** edit the `envVars` in `render.yaml`, or change them in the dashboard.
+- **Fine-tuned model:** Render's filesystem is reset on every deploy. Either copy `best.pt` into the image, or uncomment the `disk` block, upload the file there and set `DETECT_MODEL_WEIGHTS=/var/data/models/best.pt`.
+
 ## Development
 
 ```bash
