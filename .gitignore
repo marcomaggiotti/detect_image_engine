@@ -218,3 +218,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Model weights and training outputs
+*.pt
+*.pth
+*.onnx
+*.engine
+models/
+runs/
+datasets/
