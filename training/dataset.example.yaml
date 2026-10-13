@@ -1,0 +1,22 @@
+# Ultralytics/YOLO dataset definition used by training/finetune.py.
+#
+# Layout (one .txt per image, same file name; each line is
+# "<class_id> <x_center> <y_center> <width> <height>", normalised to 0-1):
+#
+#   datasets/pets/
+#     images/train/*.jpg   labels/train/*.txt
+#     images/val/*.jpg     labels/val/*.txt
+#
+# Labelling tools such as CVAT, Label Studio or Roboflow export this format.
+#
+# IMPORTANT: fine-tuning replaces the model's class list with the one below.
+# Include every class the service must keep detecting (e.g. keep "person"
+# if you still need people), with annotated examples of each.
+path: ../datasets/pets
+train: images/train
+val: images/val
+
+names:
+  0: cat
+  1: dog
+  2: person
