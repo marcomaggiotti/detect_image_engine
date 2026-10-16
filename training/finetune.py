@@ -2,7 +2,7 @@
 
 Example:
     python -m training.finetune --data training/dataset.example.yaml \
-        --base yolo11n.pt --epochs 50 --name pets-v1
+        --base yolo11n.pt --epochs 50 --name pets-v1 --preset indoor-camera
 
 The best checkpoint is written under runs/<name>/weights/best.pt; the script
 prints the environment variables to serve it. Requires the ultralytics extra.
@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+
+from training.presets import PRESETS, preset
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -32,6 +34,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Freeze the first N layers (e.g. 10 = backbone) for small datasets",
+    )
+    p.add_argument(
+        "--preset",
+        default="default",
+        choices=sorted(PRESETS),
+        help="Augmentations matching the camera (training/presets.py), e.g. indoor-camera",
+    )
+    p.add_argument(
+        "--patience",
+        type=int,
+        default=20,
+        help="Stop when validation has not improved for this many epochs (0 = never)",
     )
     p.add_argument("--project", default="runs", help="Output directory")
     p.add_argument("--name", default="finetune", help="Run name, used as model version")
@@ -56,9 +70,11 @@ def main(argv: list[str] | None = None) -> Path:
         batch=args.batch,
         device=args.device,
         freeze=args.freeze,
+        patience=args.patience,
         project=str(Path(args.project).resolve()),
         name=args.name,
         exist_ok=True,
+        **preset(args.preset),
     )
     best = Path(model.trainer.best)
 
@@ -73,6 +89,9 @@ def main(argv: list[str] | None = None) -> Path:
     )
     print(f"\nValidation mAP50-95: {metrics.box.map:.3f}  mAP50: {metrics.box.map50:.3f}")
     print(f"Classes: {tuned.names}")
+    threshold = best_confidence(metrics)
+    if threshold is not None:
+        print(f"Best confidence threshold on the validation set (highest F1): {threshold:.2f}")
 
     weights = best
     if args.export:
@@ -85,7 +104,23 @@ def main(argv: list[str] | None = None) -> Path:
         print("  DETECT_MODEL_ARCH=rtdetr")
     print(f"  DETECT_MODEL_VERSION={args.name}")
     print(f"  DETECT_TARGET_CLASSES={','.join(tuned.names.values())}")
+    if threshold is not None:
+        print(f"  DETECT_CONFIDENCE_THRESHOLD={threshold:.2f}")
     return weights
+
+
+def best_confidence(metrics) -> float | None:
+    """The confidence where F1 (precision and recall together) peaks on the
+    validation set, averaged over classes: a good default threshold."""
+    try:
+        f1 = [list(row) for row in metrics.box.f1_curve]
+        px = list(metrics.box.px)
+    except (AttributeError, TypeError):
+        return None
+    if not f1 or not px:
+        return None
+    mean = [sum(column) / len(f1) for column in zip(*f1, strict=False)]
+    return float(px[max(range(len(mean)), key=mean.__getitem__)])
 
 
 if __name__ == "__main__":
