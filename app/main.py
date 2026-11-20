@@ -5,8 +5,12 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app import __doc__ as description
 from app.api.routes import router
@@ -26,6 +30,7 @@ def build_detector(settings: Settings) -> Detector:
         iou_threshold=settings.iou_threshold,
         image_size=settings.image_size,
         max_detections=settings.max_detections,
+        half=settings.half,
     )
     return create_detector(settings.backend, config)
 
@@ -44,6 +49,10 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
             confidence_threshold=settings.confidence_threshold,
             max_image_pixels=settings.max_image_pixels,
         )
+        if settings.lab_enabled:
+            from app.lab.routes import Lab
+
+            app.state.lab = Lab(settings)
         if settings.warmup:
             model.warmup()
         logger.info(
@@ -62,6 +71,44 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
         lifespan=lifespan,
     )
     app.include_router(router)
+    if settings.lab_enabled:
+        from app.lab.routes import router as lab_router
+
+        app.include_router(lab_router)
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.cors_origins,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    @app.get("/v1/info", tags=["ops"])
+    def info(request: Request) -> dict:
+        """Module descriptor used by the MultiVision AI Manager."""
+        service = request.app.state.service
+        current = request.app.state.settings
+        return {
+            "name": "yolo",
+            "kind": "detector",
+            "title": "YOLO detection & pose",
+            "version": app.version,
+            "model": current.model_weights,
+            "task": service.detector.task,
+            "device": service.detector.config.device or "auto",
+            "capabilities": ["detect", "pose"] + (["lab"] if settings.lab_enabled else []),
+            "ui": "/ui/",
+            "docs": "/docs",
+        }
+
+    static = Path(__file__).parent / "static"
+    if static.is_dir():
+        app.mount("/ui", StaticFiles(directory=static, html=True), name="ui")
+
+        @app.get("/", include_in_schema=False)
+        def root() -> RedirectResponse:
+            return RedirectResponse("ui/")
+
     return app
 
 

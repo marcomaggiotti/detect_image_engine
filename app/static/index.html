@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLO Module</title>
+<style>
+  :root { --bg:#f7f7f5; --fg:#1d1d1b; --muted:#6b6b66; --card:#fff; --line:#e3e3de; --accent:#2f6f4e; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#161615; --fg:#ecebe6; --muted:#a3a29b; --card:#212120; --line:#34342f; --accent:#7cc39a; } }
+  * { box-sizing:border-box } body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--fg) }
+  main { max-width:1100px; margin:0 auto; padding:16px } h1 { font-size:20px; margin:4px 0 2px }
+  .muted { color:var(--muted) } .grid { display:grid; grid-template-columns: 320px 1fr; gap:16px } @media (max-width:800px){ .grid{grid-template-columns:1fr} }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px }
+  label { display:block; margin:10px 0 4px; font-weight:600 } input[type=text],input[type=number]{ width:100%; padding:6px; border:1px solid var(--line); border-radius:6px; background:transparent; color:inherit }
+  input[type=range]{ width:100% } button { background:var(--accent); color:#fff; border:0; border-radius:6px; padding:8px 14px; cursor:pointer; margin-top:12px }
+  canvas { max-width:100%; border-radius:8px } pre { white-space:pre-wrap; font-size:12px; max-height:260px; overflow:auto }
+  a { color:var(--accent) }
+</style>
+</head>
+<body>
+<main>
+  <h1>YOLO detection &amp; pose module</h1>
+  <p class="muted" id="model">Loading model…</p>
+  <p class="muted">Standalone page of this module. Use the MultiVision AI Manager for datasets, training, robustness and latency tools · <a href="../docs">API docs</a></p>
+  <div class="grid">
+    <div class="card">
+      <label>Image</label><input type="file" id="file" accept="image/*">
+      <label>Classes <span class="muted">(comma separated, * = all)</span></label><input type="text" id="classes" value="person">
+      <label>Confidence <span id="confv">0.25</span></label><input type="range" id="conf" min="0" max="1" step="0.01" value="0.25">
+      <label>NMS IoU <span id="iouv"></span></label><input type="range" id="iou" min="0.1" max="0.95" step="0.05">
+      <label>Input size</label><input type="number" id="imgsz" step="32" min="160" max="1536">
+      <button id="run">Detect</button>
+    </div>
+    <div class="card"><canvas id="canvas" width="10" height="10"></canvas><pre id="out"></pre></div>
+  </div>
+</main>
+<script>
+const SKELETON = [[15,13],[13,11],[16,14],[14,12],[11,12],[5,11],[6,12],[5,6],[5,7],[6,8],[7,9],[8,10],[1,2],[0,1],[0,2],[1,3],[2,4],[3,5],[4,6]];
+const $ = (id) => document.getElementById(id);
+let image = null;
+async function init() {
+  const m = await (await fetch("../v1/model")).json();
+  $("model").textContent = `${m.weights} · task ${m.task} · ${Object.keys(m.labels).length} classes`;
+  try {
+    const rt = await (await fetch("../v1/lab/runtime")).json();
+    $("iou").value = rt.iou_threshold; $("iouv").textContent = rt.iou_threshold; $("imgsz").value = rt.image_size;
+  } catch { $("iou").disabled = true; }
+}
+$("conf").oninput = () => $("confv").textContent = $("conf").value;
+$("iou").oninput = () => $("iouv").textContent = $("iou").value;
+$("file").onchange = () => { const f = $("file").files[0]; if (!f) return; image = new Image(); image.onload = () => draw([]); image.src = URL.createObjectURL(f); };
+function draw(dets) {
+  const c = $("canvas"), ctx = c.getContext("2d");
+  c.width = image.naturalWidth; c.height = image.naturalHeight; ctx.drawImage(image, 0, 0);
+  const lw = Math.max(2, c.width / 400);
+  ctx.lineWidth = lw; ctx.font = `${12 * lw / 2 + 8}px sans-serif`;
+  for (const d of dets) {
+    const b = d.box; ctx.strokeStyle = "#e4572e"; ctx.strokeRect(b.x1, b.y1, b.x2 - b.x1, b.y2 - b.y1);
+    ctx.fillStyle = "#e4572e"; ctx.fillText(`${d.label} ${d.confidence.toFixed(2)}`, b.x1 + 3, b.y1 - 4);
+    if (d.keypoints) {
+      ctx.strokeStyle = "#2fbf71";
+      for (const [a, z] of SKELETON) { const p = d.keypoints[a], q = d.keypoints[z]; if (p[2] > .4 && q[2] > .4) { ctx.beginPath(); ctx.moveTo(p[0], p[1]); ctx.lineTo(q[0], q[1]); ctx.stroke(); } }
+      ctx.fillStyle = "#ffd23f"; for (const p of d.keypoints) if (p[2] > .4) { ctx.beginPath(); ctx.arc(p[0], p[1], lw * 1.5, 0, 7); ctx.fill(); }
+    }
+  }
+}
+$("run").onclick = async () => {
+  const f = $("file").files[0]; if (!f) return alert("Choose an image first");
+  if (!$("iou").disabled) await fetch("../v1/lab/runtime", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ iou_threshold: +$("iou").value, image_size: +$("imgsz").value }) });
+  const fd = new FormData(); fd.append("image", f);
+  const q = new URLSearchParams({ classes: $("classes").value || "*", confidence: $("conf").value });
+  const res = await fetch(`../v1/detect?${q}`, { method: "POST", body: fd });
+  const body = await res.json();
+  $("out").textContent = JSON.stringify(res.ok ? { counts: body.counts, inference_ms: body.inference_ms } : body, null, 2);
+  if (res.ok) draw(body.detections);
+};
+init();
+</script>
+</body>
+</html>

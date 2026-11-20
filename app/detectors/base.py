@@ -23,6 +23,8 @@ class Detection:
     confidence: float
     # Pixel coordinates in the input image: (x1, y1, x2, y2).
     box: tuple[float, float, float, float]
+    # Pose models only: one (x, y, visibility) per keypoint, in pixels.
+    keypoints: tuple[tuple[float, float, float], ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,8 @@ class DetectorConfig:
     iou_threshold: float = 0.45
     image_size: int = 640
     max_detections: int = 100
+    # FP16 inference (CUDA only): roughly halves latency and memory.
+    half: bool = False
 
 
 class Detector(ABC):
@@ -41,6 +45,8 @@ class Detector(ABC):
 
     #: Short name reported by the API.
     backend_name: str = "custom"
+    #: "detect", or "pose" when detections also carry keypoints.
+    task: str = "detect"
 
     def __init__(self, config: DetectorConfig) -> None:
         self.config = config

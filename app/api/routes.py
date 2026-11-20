@@ -62,6 +62,7 @@ def model_info(request: Request) -> ModelInfo:
     return ModelInfo(
         **_model_ref(request).model_dump(),
         arch=_settings(request).model_arch,
+        task=service.detector.task,
         default_classes=service.default_selection.names,
         confidence_threshold=service.confidence_threshold,
         labels=service.detector.labels,
@@ -122,6 +123,9 @@ async def detect(
                 class_id=d.class_id,
                 confidence=round(d.confidence, 4),
                 box=_box(d.box),
+                keypoints=[[round(v, 2) for v in kp] for kp in d.keypoints]
+                if d.keypoints
+                else None,
             )
             for d in result.detections
         ],

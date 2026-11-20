@@ -8,6 +8,8 @@ from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 
+from PIL import Image
+
 from app.detectors import Detection, Detector
 from app.imaging import decode_image
 
@@ -80,8 +82,17 @@ class DetectionService:
         classes: list[str] | None = None,
         confidence: float | None = None,
     ) -> DetectionResult:
-        selection = self.select_classes(classes)
         image = decode_image(data, max_pixels=self.max_image_pixels)
+        return self.detect_image(image, classes=classes, confidence=confidence)
+
+    def detect_image(
+        self,
+        image: Image.Image,
+        *,
+        classes: list[str] | None = None,
+        confidence: float | None = None,
+    ) -> DetectionResult:
+        selection = self.select_classes(classes)
         threshold = self.confidence_threshold if confidence is None else confidence
 
         start = time.perf_counter()

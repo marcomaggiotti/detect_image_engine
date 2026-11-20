@@ -15,7 +15,7 @@ from PIL import Image
 
 from app.detectors.base import Detection, Detector, DetectorConfig, load_labels
 
-_BOX_TASKS = {"detect", "segment"}
+_BOX_TASKS = {"detect", "segment", "pose"}
 
 
 class UltralyticsDetector(Detector):
@@ -42,6 +42,7 @@ class UltralyticsDetector(Detector):
                 f"{config.weights!r} is a {self._model.task!r} model; a detection model is required"
             )
 
+        self.task = "pose" if self._model.task == "pose" else "detect"
         if config.labels_file:
             self._labels = load_labels(config.labels_file)
         else:
@@ -68,16 +69,32 @@ class UltralyticsDetector(Detector):
             classes=sorted(class_ids) if class_ids is not None else None,
             device=cfg.device,
             verbose=False,
+            # Only passed when on: recent Ultralytics versions deprecate the flag.
+            **({"half": True} if cfg.half else {}),
         )
         boxes = results[0].boxes
         if boxes is None or len(boxes) == 0:
             return []
 
+        keypoints: list = [None] * len(boxes)
+        kpts = results[0].keypoints
+        if kpts is not None and kpts.xy is not None:
+            xy = kpts.xy.cpu().tolist()
+            vis = kpts.conf.cpu().tolist() if kpts.conf is not None else None
+            keypoints = [
+                tuple(
+                    (float(x), float(y), float(vis[i][k]) if vis else 1.0)
+                    for k, (x, y) in enumerate(points)
+                )
+                for i, points in enumerate(xy)
+            ]
+
         detections = []
-        for xyxy, score, cls in zip(
+        for xyxy, score, cls, kp in zip(
             boxes.xyxy.cpu().tolist(),
             boxes.conf.cpu().tolist(),
             boxes.cls.cpu().tolist(),
+            keypoints,
             strict=True,
         ):
             class_id = int(cls)
@@ -87,6 +104,7 @@ class UltralyticsDetector(Detector):
                     class_id=class_id,
                     confidence=float(score),
                     box=tuple(float(v) for v in xyxy),
+                    keypoints=kp,
                 )
             )
         return detections

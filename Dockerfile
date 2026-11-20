@@ -20,15 +20,21 @@ RUN pip install torch torchvision --index-url ${TORCH_INDEX}
 
 COPY pyproject.toml README.md ./
 COPY app ./app
+COPY training ./training
 RUN pip install ".[ultralytics,torchvision]"
 
-# Bake the default pretrained model into the image. To serve another or a
-# fine-tuned model, mount it (e.g. -v ./runs/pets-v1/weights:/models/custom)
-# and set DETECT_MODEL_WEIGHTS.
-RUN mkdir /models && cd /models && python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+# Bake pretrained models into the image (space separated). To serve another or
+# a fine-tuned model, mount it (e.g. -v ./runs/pets-v1/weights:/models/custom)
+# and set DETECT_MODEL_WEIGHTS. yolo11n-pose.pt adds 17 body keypoints.
+ARG BAKE_WEIGHTS="yolo11n.pt yolo11n-pose.pt"
+RUN mkdir /models && cd /models && for w in $BAKE_WEIGHTS; do \
+        python -c "from ultralytics import YOLO; YOLO('$w')"; done
 ENV DETECT_MODEL_WEIGHTS=/models/yolo11n.pt
 
-RUN useradd --system --no-create-home app
+# The lab (datasets, training runs, downloaded/exported weights) writes here:
+# mount a volume on /data to keep them.
+RUN useradd --system --create-home app && mkdir -p /data && chown app /data
+ENV DETECT_DATA_DIR=/data YOLO_CONFIG_DIR=/data/ultralytics
 USER app
 
 # Platforms such as Render inject the port to listen on through $PORT.

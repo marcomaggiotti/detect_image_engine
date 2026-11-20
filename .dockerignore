@@ -11,4 +11,4 @@ models
 *.pt
 *.onnx
 tests
-training
+data
