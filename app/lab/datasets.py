@@ -6,13 +6,15 @@
 
 A missing label file means "not annotated yet"; an empty one means
 "annotated, nothing in it" (a useful background image).
+
+Label line (detection): ``class x_center y_center width height``; pose datasets add
+17 COCO keypoints as ``x y visibility`` triples.
 """
 
 from __future__ import annotations
 
 import io
 import json
-import math
 import re
 import shutil
 import time
@@ -25,22 +27,37 @@ from PIL import Image
 from app.imaging import decode_image
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
-_SAFE = re.compile(r"[^A-Za-z0-9._-]+")
+COCO_KEYPOINT_COUNT = 17
+MIN_BOXES_PER_CLASS = 50
+MAX_IMBALANCE_RATIO = 5
+MIN_BACKGROUND_SHARE = 0.05
+SMALL_OBJECT_AREA = 0.01  # share of the picture
+_UNSAFE_CHARACTERS = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class DatasetError(ValueError):
-    pass
+    """Invalid dataset operation (bad name, class id out of range, ...)."""
 
 
-class NotFound(LookupError):
-    pass
+class DatasetNotFoundError(LookupError):
+    """The dataset or one of its images does not exist."""
 
 
 def safe_name(name: str) -> str:
-    cleaned = _SAFE.sub("_", Path(name).name).strip("._")
+    """A file-system safe version of ``name`` (no path, no special characters)."""
+    cleaned = _UNSAFE_CHARACTERS.sub("_", Path(name).name).strip("._")
     if not cleaned:
         raise DatasetError(f"invalid name {name!r}")
     return cleaned
+
+
+def _clean_class_names(class_names: list[str]) -> list[str]:
+    return [name.strip() for name in class_names if name.strip()]
+
+
+def _label_path(image_path: Path) -> Path:
+    """``<dataset>/images/x.jpg`` -> ``<dataset>/labels/x.txt``."""
+    return image_path.parent.parent / "labels" / f"{image_path.stem}.txt"
 
 
 class DatasetStore:
@@ -48,275 +65,325 @@ class DatasetStore:
         self.root = root
         self.max_pixels = max_pixels
 
-    # --- datasets ---------------------------------------------------------
+    # --- datasets -------------------------------------------------------------------
     def path(self, dataset_id: str) -> Path:
-        path = self.root / safe_name(dataset_id)
-        if not (path / "meta.json").is_file():
-            raise NotFound(f"dataset {dataset_id!r} not found")
-        return path
+        dataset_path = self.root / safe_name(dataset_id)
+        if not (dataset_path / "meta.json").is_file():
+            raise DatasetNotFoundError(f"dataset {dataset_id!r} not found")
+        return dataset_path
 
-    def meta(self, dataset_id: str) -> dict:
+    def metadata(self, dataset_id: str) -> dict:
         return json.loads((self.path(dataset_id) / "meta.json").read_text())
 
+    def _write_metadata(self, dataset_id: str, metadata: dict) -> None:
+        (self.path(dataset_id) / "meta.json").write_text(json.dumps(metadata, indent=2))
+
     def list(self) -> list[dict]:
+        """Every dataset with its number of images and of annotated images."""
         if not self.root.exists():
             return []
-        out = []
-        for d in sorted(self.root.iterdir()):
-            if (d / "meta.json").is_file():
-                meta = json.loads((d / "meta.json").read_text())
-                images = self._images(d)
-                meta["images"] = len(images)
-                meta["annotated"] = sum((d / "labels" / f"{p.stem}.txt").exists() for p in images)
-                out.append(meta)
-        return out
+        datasets = []
+        for dataset_path in sorted(self.root.iterdir()):
+            if not (dataset_path / "meta.json").is_file():
+                continue
+            metadata = json.loads((dataset_path / "meta.json").read_text())
+            image_paths = self._image_paths(dataset_path)
+            metadata["images"] = len(image_paths)
+            metadata["annotated"] = sum(_label_path(image).exists() for image in image_paths)
+            datasets.append(metadata)
+        return datasets
 
     def create(
-        self, name: str, classes: list[str], task: str = "detect", description: str = ""
+        self, name: str, class_names: list[str], task: str = "detect", description: str = ""
     ) -> dict:
         if task not in {"detect", "pose"}:
             raise DatasetError("task must be 'detect' or 'pose'")
-        classes = [c.strip() for c in classes if c.strip()]
-        if not classes:
+        class_names = _clean_class_names(class_names)
+        if not class_names:
             raise DatasetError("a dataset needs at least one class")
-        if len(set(classes)) != len(classes):
+        if len(set(class_names)) != len(class_names):
             raise DatasetError("class names must be unique")
         dataset_id = safe_name(name).lower()
-        path = self.root / dataset_id
-        if path.exists():
+        dataset_path = self.root / dataset_id
+        if dataset_path.exists():
             raise DatasetError(f"dataset {dataset_id!r} already exists")
-        (path / "images").mkdir(parents=True)
-        (path / "labels").mkdir()
-        meta = {
+        (dataset_path / "images").mkdir(parents=True)
+        (dataset_path / "labels").mkdir()
+        metadata = {
             "id": dataset_id,
             "name": name,
             "task": task,
-            "classes": classes,
+            "classes": class_names,
             "description": description,
             "created": time.time(),
         }
-        (path / "meta.json").write_text(json.dumps(meta, indent=2))
-        return meta
+        (dataset_path / "meta.json").write_text(json.dumps(metadata, indent=2))
+        return metadata
 
-    def update_classes(self, dataset_id: str, classes: list[str]) -> dict:
+    def update_classes(self, dataset_id: str, class_names: list[str]) -> dict:
         """Rename or append classes. Removing classes would renumber labels: refused."""
-        meta = self.meta(dataset_id)
-        classes = [c.strip() for c in classes if c.strip()]
-        if len(classes) < len(meta["classes"]):
+        metadata = self.metadata(dataset_id)
+        class_names = _clean_class_names(class_names)
+        if len(class_names) < len(metadata["classes"]):
             raise DatasetError("classes can be renamed or added, not removed")
-        meta["classes"] = classes
-        (self.path(dataset_id) / "meta.json").write_text(json.dumps(meta, indent=2))
-        return meta
+        metadata["classes"] = class_names
+        self._write_metadata(dataset_id, metadata)
+        return metadata
 
     def delete(self, dataset_id: str) -> None:
         shutil.rmtree(self.path(dataset_id))
 
-    # --- images -----------------------------------------------------------
+    # --- images ---------------------------------------------------------------------
     @staticmethod
-    def _images(path: Path) -> list[Path]:
-        return sorted(p for p in (path / "images").iterdir() if p.suffix.lower() in IMAGE_SUFFIXES)
+    def _image_paths(dataset_path: Path) -> list[Path]:
+        return sorted(
+            path
+            for path in (dataset_path / "images").iterdir()
+            if path.suffix.lower() in IMAGE_SUFFIXES
+        )
 
     def images(self, dataset_id: str) -> list[dict]:
-        path = self.path(dataset_id)
-        out = []
-        for p in self._images(path):
-            label = path / "labels" / f"{p.stem}.txt"
-            boxes = self._read(label) if label.exists() else None
-            out.append(
+        """Every image with its annotation status and number of objects."""
+        summaries = []
+        for image_path in self._image_paths(self.path(dataset_id)):
+            label_path = _label_path(image_path)
+            objects = self._read_label_file(label_path) if label_path.exists() else None
+            summaries.append(
                 {
-                    "file": p.name,
-                    "annotated": boxes is not None,
-                    "objects": len(boxes) if boxes is not None else 0,
+                    "file": image_path.name,
+                    "annotated": objects is not None,
+                    "objects": len(objects) if objects is not None else 0,
                 }
             )
-        return out
+        return summaries
 
-    def add_image(self, dataset_id: str, filename: str, data: bytes) -> str:
-        path = self.path(dataset_id)
-        image = decode_image(data, max_pixels=self.max_pixels)  # validates
+    def add_image(self, dataset_id: str, filename: str, content: bytes) -> str:
+        """Validate and store an image as JPEG; returns its file name (made unique)."""
+        dataset_path = self.path(dataset_id)
+        image = decode_image(content, max_pixels=self.max_pixels)
         stem = Path(safe_name(filename)).stem
-        target = path / "images" / f"{stem}.jpg"
-        n = 1
-        while target.exists() or (path / "labels" / f"{target.stem}.txt").exists():
-            target = path / "images" / f"{stem}_{n}.jpg"
-            n += 1
+        target = dataset_path / "images" / f"{stem}.jpg"
+        suffix_number = 1
+        while target.exists() or _label_path(target).exists():
+            target = dataset_path / "images" / f"{stem}_{suffix_number}.jpg"
+            suffix_number += 1
         image.save(target, format="JPEG", quality=95)
         return target.name
 
     def image_file(self, dataset_id: str, filename: str) -> Path:
-        p = self.path(dataset_id) / "images" / safe_name(filename)
-        if not p.is_file():
-            raise NotFound(f"image {filename!r} not found")
-        return p
+        image_path = self.path(dataset_id) / "images" / safe_name(filename)
+        if not image_path.is_file():
+            raise DatasetNotFoundError(f"image {filename!r} not found")
+        return image_path
 
     def delete_image(self, dataset_id: str, filename: str) -> None:
-        p = self.image_file(dataset_id, filename)
-        (p.parent.parent / "labels" / f"{p.stem}.txt").unlink(missing_ok=True)
-        p.unlink()
+        image_path = self.image_file(dataset_id, filename)
+        _label_path(image_path).unlink(missing_ok=True)
+        image_path.unlink()
 
-    # --- labels -----------------------------------------------------------
+    # --- labels ---------------------------------------------------------------------
     @staticmethod
-    def _read(label: Path) -> list[dict]:
-        boxes = []
-        for line in label.read_text().splitlines():
-            parts = line.split()
-            if len(parts) < 5:
+    def _read_label_file(label_path: Path) -> list[dict]:
+        objects = []
+        for line in label_path.read_text().splitlines():
+            values = line.split()
+            if len(values) < 5:
                 continue
-            box = {
-                "cls": int(parts[0]),
-                "x": float(parts[1]),
-                "y": float(parts[2]),
-                "w": float(parts[3]),
-                "h": float(parts[4]),
+            class_id, x_center, y_center, width, height = values[:5]
+            label = {
+                "cls": int(class_id),
+                "x": float(x_center),
+                "y": float(y_center),
+                "w": float(width),
+                "h": float(height),
             }
-            rest = [float(v) for v in parts[5:]]
-            if rest and len(rest) % 3 == 0:
-                box["keypoints"] = [rest[i : i + 3] for i in range(0, len(rest), 3)]
-            boxes.append(box)
-        return boxes
+            keypoint_values = [float(value) for value in values[5:]]
+            if keypoint_values and len(keypoint_values) % 3 == 0:
+                label["keypoints"] = [
+                    keypoint_values[start : start + 3]
+                    for start in range(0, len(keypoint_values), 3)
+                ]
+            objects.append(label)
+        return objects
 
     def labels(self, dataset_id: str, filename: str) -> list[dict] | None:
-        image = self.image_file(dataset_id, filename)
-        label = image.parent.parent / "labels" / f"{image.stem}.txt"
-        return self._read(label) if label.exists() else None
+        """The image's objects, or ``None`` when it is not annotated yet."""
+        label_path = _label_path(self.image_file(dataset_id, filename))
+        return self._read_label_file(label_path) if label_path.exists() else None
 
-    def save_labels(self, dataset_id: str, filename: str, boxes: list[dict]) -> int:
-        meta = self.meta(dataset_id)
-        image = self.image_file(dataset_id, filename)
-        n_classes = len(meta["classes"])
+    def save_labels(self, dataset_id: str, filename: str, objects: list[dict]) -> int:
+        """Write the image's label file; returns the number of objects saved."""
+        metadata = self.metadata(dataset_id)
+        image_path = self.image_file(dataset_id, filename)
+        class_count = len(metadata["classes"])
         lines = []
-        for b in boxes:
-            cls = int(b["cls"])
-            if not 0 <= cls < n_classes:
-                raise DatasetError(f"class id {cls} out of range (0-{n_classes - 1})")
-            x, y, w, h = (min(1.0, max(0.0, float(b[k]))) for k in ("x", "y", "w", "h"))
-            if w <= 0 or h <= 0:
+        for label in objects:
+            class_id = int(label["cls"])
+            if not 0 <= class_id < class_count:
+                raise DatasetError(f"class id {class_id} out of range (0-{class_count - 1})")
+            x_center, y_center, width, height = (
+                min(1.0, max(0.0, float(label[key]))) for key in ("x", "y", "w", "h")
+            )
+            if width <= 0 or height <= 0:
                 continue
-            fields = [str(cls), *(f"{v:.6f}" for v in (x, y, w, h))]
-            if meta["task"] == "pose":
-                kpts = b.get("keypoints") or [[0.0, 0.0, 0.0]] * 17
-                if len(kpts) != 17:
-                    raise DatasetError("pose datasets need 17 COCO keypoints per object")
-                fields += [f"{float(v):.6f}" for kp in kpts for v in kp]
+            fields = [
+                str(class_id),
+                *(f"{value:.6f}" for value in (x_center, y_center, width, height)),
+            ]
+            if metadata["task"] == "pose":
+                fields += self._keypoint_fields(label.get("keypoints"))
             lines.append(" ".join(fields))
-        label = image.parent.parent / "labels" / f"{image.stem}.txt"
-        label.write_text("".join(f"{line}\n" for line in lines))
+        _label_path(image_path).write_text("".join(f"{line}\n" for line in lines))
         return len(lines)
 
-    def clear_labels(self, dataset_id: str, filename: str) -> None:
-        image = self.image_file(dataset_id, filename)
-        (image.parent.parent / "labels" / f"{image.stem}.txt").unlink(missing_ok=True)
-
-    # --- statistics ---------------------------------------------------------
-    def stats(self, dataset_id: str, weight_power: float = 0.5) -> dict:
-        """Class balance of the annotated images, with suggested class weights.
-
-        Suggested weight of class c: ``(N / (K * n_c)) ** power`` normalised to a
-        mean of 1 (power 1 = inverse frequency, 0.5 = its softer square root).
-        """
-        meta = self.meta(dataset_id)
-        path = self.path(dataset_id)
-        names = meta["classes"]
-        boxes = Counter()
-        images_with = Counter()
-        annotated = background = 0
-        sizes = []
-        all_images = self._images(path)
-        for p in all_images:
-            label = path / "labels" / f"{p.stem}.txt"
-            if not label.exists():
-                continue
-            annotated += 1
-            objects = self._read(label)
-            if not objects:
-                background += 1
-            for b in objects:
-                boxes[b["cls"]] += 1
-                sizes.append(b["w"] * b["h"])
-            images_with.update({b["cls"] for b in objects})
-
-        counts = {name: boxes.get(i, 0) for i, name in enumerate(names)}
-        present = [c for c in counts.values() if c > 0]
-        total = sum(present)
-        raw = [(total / (len(names) * c)) ** weight_power if c else 0.0 for c in counts.values()]
-        nonzero = [w for w in raw if w > 0]
-        mean = sum(nonzero) / len(nonzero) if nonzero else 1.0
-        weights = [round(w / mean, 3) if w else 1.0 for w in raw]
-
-        warnings = []
-        for name, c in counts.items():
-            if c < 50:
-                warnings.append(f"'{name}' has {c} boxes: aim for 50+ (ideally 200+) per class")
-        if present and max(present) / min(present) > 5:
-            warnings.append(
-                "strong class imbalance (ratio "
-                f"{max(present) / min(present):.1f}): consider repeat-factor sampling, "
-                "class weights or a focal classification loss"
+    @staticmethod
+    def _keypoint_fields(keypoints: list[list[float]] | None) -> list[str]:
+        keypoints = keypoints or [[0.0, 0.0, 0.0]] * COCO_KEYPOINT_COUNT
+        if len(keypoints) != COCO_KEYPOINT_COUNT:
+            raise DatasetError(
+                f"pose datasets need {COCO_KEYPOINT_COUNT} COCO keypoints per object"
             )
-        if annotated and background / annotated < 0.05:
-            warnings.append("fewer than 5% background images: add a few empty frames")
-        small = sum(s < 0.01 for s in sizes)
+        return [f"{float(value):.6f}" for keypoint in keypoints for value in keypoint]
+
+    def clear_labels(self, dataset_id: str, filename: str) -> None:
+        _label_path(self.image_file(dataset_id, filename)).unlink(missing_ok=True)
+
+    # --- statistics -----------------------------------------------------------------
+    def stats(self, dataset_id: str, weight_power: float = 0.5) -> dict:
+        """Class balance of the annotated images, with suggested class weights."""
+        class_names = self.metadata(dataset_id)["classes"]
+        image_paths = self._image_paths(self.path(dataset_id))
+        boxes_per_class: Counter = Counter()
+        images_per_class: Counter = Counter()
+        object_areas: list[float] = []
+        annotated_count = background_count = 0
+        for image_path in image_paths:
+            label_path = _label_path(image_path)
+            if not label_path.exists():
+                continue
+            annotated_count += 1
+            objects = self._read_label_file(label_path)
+            if not objects:
+                background_count += 1
+            for label in objects:
+                boxes_per_class[label["cls"]] += 1
+                object_areas.append(label["w"] * label["h"])
+            images_per_class.update({label["cls"] for label in objects})
+
+        box_counts = {name: boxes_per_class.get(index, 0) for index, name in enumerate(class_names)}
+        present_counts = [count for count in box_counts.values() if count > 0]
+        imbalance_ratio = max(present_counts) / min(present_counts) if present_counts else None
+        small_objects = sum(area < SMALL_OBJECT_AREA for area in object_areas)
         return {
-            "classes": names,
-            "images": len(all_images),
-            "annotated": annotated,
-            "unannotated": len(all_images) - annotated,
-            "background": background,
-            "boxes": counts,
-            "images_with_class": {name: images_with.get(i, 0) for i, name in enumerate(names)},
-            "imbalance_ratio": round(max(present) / min(present), 2) if present else None,
-            "suggested_class_weights": weights,
-            "small_objects_share": round(small / len(sizes), 3) if sizes else 0.0,
-            "warnings": warnings,
+            "classes": class_names,
+            "images": len(image_paths),
+            "annotated": annotated_count,
+            "unannotated": len(image_paths) - annotated_count,
+            "background": background_count,
+            "boxes": box_counts,
+            "images_with_class": {
+                name: images_per_class.get(index, 0) for index, name in enumerate(class_names)
+            },
+            "imbalance_ratio": round(imbalance_ratio, 2) if imbalance_ratio else None,
+            "suggested_class_weights": suggested_class_weights(
+                list(box_counts.values()), weight_power
+            ),
+            "small_objects_share": round(small_objects / len(object_areas), 3)
+            if object_areas
+            else 0.0,
+            "warnings": _balance_warnings(
+                box_counts, imbalance_ratio, annotated_count, background_count
+            ),
         }
 
-    # --- import / export ------------------------------------------------------
-    def import_zip(self, dataset_id: str, data: bytes) -> dict:
-        """Import a YOLO-format zip: images/... and labels/... (any depth),
-        optionally classes.txt. Labels must use this dataset's class ids."""
-        path = self.path(dataset_id)
-        added = labelled = 0
-        with zipfile.ZipFile(io.BytesIO(data)) as zf:
-            members = {Path(n): n for n in zf.namelist() if not n.endswith("/")}
-            labels = {
-                p.stem: n for p, n in members.items() if p.suffix == ".txt" and "labels" in p.parts
+    # --- import / export ------------------------------------------------------------
+    def import_zip(self, dataset_id: str, archive: bytes) -> dict:
+        """Import a YOLO-format zip: images/... and labels/... (any depth).
+
+        Labels must use this dataset's class ids.
+        """
+        dataset_path = self.path(dataset_id)
+        image_count = labelled_count = 0
+        with zipfile.ZipFile(io.BytesIO(archive)) as zip_file:
+            members = {Path(name): name for name in zip_file.namelist() if not name.endswith("/")}
+            label_members = {
+                path.stem: name
+                for path, name in members.items()
+                if path.suffix == ".txt" and "labels" in path.parts
             }
-            for p, n in members.items():
-                if p.suffix.lower() not in IMAGE_SUFFIXES:
+            for path, name in members.items():
+                if path.suffix.lower() not in IMAGE_SUFFIXES:
                     continue
-                saved = self.add_image(dataset_id, p.name, zf.read(n))
-                added += 1
-                if p.stem in labels:
-                    (path / "labels" / f"{Path(saved).stem}.txt").write_bytes(
-                        zf.read(labels[p.stem])
-                    )
-                    labelled += 1
-        return {"images": added, "labelled": labelled}
+                saved_name = self.add_image(dataset_id, path.name, zip_file.read(name))
+                image_count += 1
+                if path.stem in label_members:
+                    saved_label = _label_path(dataset_path / "images" / saved_name)
+                    saved_label.write_bytes(zip_file.read(label_members[path.stem]))
+                    labelled_count += 1
+        return {"images": image_count, "labelled": labelled_count}
 
     def export_zip(self, dataset_id: str) -> bytes:
-        path = self.path(dataset_id)
-        meta = self.meta(dataset_id)
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("classes.txt", "\n".join(meta["classes"]) + "\n")
-            for p in self._images(path):
-                zf.write(p, f"images/{p.name}")
-                label = path / "labels" / f"{p.stem}.txt"
-                if label.exists():
-                    zf.write(label, f"labels/{label.name}")
-        return buf.getvalue()
+        """The dataset as a YOLO-format zip (classes.txt, images/, labels/)."""
+        class_names = self.metadata(dataset_id)["classes"]
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+            zip_file.writestr("classes.txt", "\n".join(class_names) + "\n")
+            for image_path in self._image_paths(self.path(dataset_id)):
+                zip_file.write(image_path, f"images/{image_path.name}")
+                label_path = _label_path(image_path)
+                if label_path.exists():
+                    zip_file.write(label_path, f"labels/{label_path.name}")
+        return buffer.getvalue()
 
 
-def thumbnail(path: Path, size: int = 256) -> bytes:
-    with Image.open(path) as im:
-        im = im.convert("RGB")
-        im.thumbnail((size, size))
-        buf = io.BytesIO()
-        im.save(buf, format="JPEG", quality=80)
-        return buf.getvalue()
+def suggested_class_weights(box_counts: list[int], power: float = 0.5) -> list[float]:
+    """Class weight ``(N / (K * n_c)) ** power``, normalised to a mean of 1.
+
+    ``power`` 1 is inverse frequency, 0.5 its softer square root. Classes without
+    boxes get 1.
+    """
+    total = sum(box_counts)
+    class_count = len(box_counts)
+    raw_weights = [
+        (total / (class_count * count)) ** power if count else 0.0 for count in box_counts
+    ]
+    nonzero = [weight for weight in raw_weights if weight > 0]
+    mean_weight = sum(nonzero) / len(nonzero) if nonzero else 1.0
+    return [round(weight / mean_weight, 3) if weight else 1.0 for weight in raw_weights]
+
+
+def _balance_warnings(
+    box_counts: dict[str, int],
+    imbalance_ratio: float | None,
+    annotated_count: int,
+    background_count: int,
+) -> list[str]:
+    warnings = [
+        f"'{name}' has {count} boxes: aim for {MIN_BOXES_PER_CLASS}+ (ideally 200+) per class"
+        for name, count in box_counts.items()
+        if count < MIN_BOXES_PER_CLASS
+    ]
+    if imbalance_ratio and imbalance_ratio > MAX_IMBALANCE_RATIO:
+        warnings.append(
+            f"strong class imbalance (ratio {imbalance_ratio:.1f}): consider repeat-factor "
+            "sampling, class weights or a focal classification loss"
+        )
+    if annotated_count and background_count / annotated_count < MIN_BACKGROUND_SHARE:
+        warnings.append("fewer than 5% background images: add a few empty frames")
+    return warnings
+
+
+def thumbnail(path: Path, max_side: int = 256) -> bytes:
+    with Image.open(path) as opened:
+        preview = opened.convert("RGB")
+    preview.thumbnail((max_side, max_side))
+    buffer = io.BytesIO()
+    preview.save(buffer, format="JPEG", quality=80)
+    return buffer.getvalue()
 
 
 def to_normalised(box: tuple[float, float, float, float], width: int, height: int) -> dict:
+    """Pixel corners -> YOLO centre/size normalised to the image size."""
     x1, y1, x2, y2 = box
     return {
         "x": (x1 + x2) / 2 / width,
@@ -324,7 +391,3 @@ def to_normalised(box: tuple[float, float, float, float], width: int, height: in
         "w": (x2 - x1) / width,
         "h": (y2 - y1) / height,
     }
-
-
-def nan_to_none(value):
-    return None if isinstance(value, float) and math.isnan(value) else value

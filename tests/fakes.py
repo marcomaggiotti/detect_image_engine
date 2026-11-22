@@ -26,18 +26,21 @@ class FakeDetector(Detector):
     def labels(self) -> dict[int, str]:
         return {0: "person", 15: "cat", 16: "dog", 56: "chair"}
 
-    def detect(
+    def predict(
         self,
         image: Image.Image,
         *,
-        confidence: float,
+        min_confidence: float,
         class_ids: Collection[int] | None = None,
     ) -> list[Detection]:
-        self.calls.append({"size": image.size, "confidence": confidence, "class_ids": class_ids})
+        self.calls.append(
+            {"size": image.size, "min_confidence": min_confidence, "class_ids": class_ids}
+        )
         return [
-            d
-            for d in self.SCENE
-            if d.confidence >= confidence and (class_ids is None or d.class_id in class_ids)
+            detection
+            for detection in self.SCENE
+            if detection.confidence >= min_confidence
+            and (class_ids is None or detection.class_id in class_ids)
         ]
 
 

@@ -14,7 +14,7 @@ def test_ultralytics_backend_from_architecture_yaml():
     pytest.importorskip("ultralytics")
     detector = create_detector("ultralytics", DetectorConfig(weights="yolo11n.yaml", device="cpu"))
     assert len(detector.labels) == 80  # untrained yaml models have numeric names
-    detections = detector.detect(IMAGE, confidence=0.0, class_ids={15})
+    detections = detector.predict(IMAGE, min_confidence=0.0, class_ids={15})
     assert all(d.class_id == 15 for d in detections)
 
 
@@ -34,7 +34,7 @@ def test_torchvision_backend_with_finetuned_checkpoint(tmp_path):
         DetectorConfig(weights=str(weights), arch=arch, labels_file=str(labels), device="cpu"),
     )
     assert detector.labels == {1: "cat", 2: "dog"}
-    detections = detector.detect(IMAGE, confidence=0.0, class_ids={1})
+    detections = detector.predict(IMAGE, min_confidence=0.0, class_ids={1})
     assert all(d.label == "cat" for d in detections)
 
 

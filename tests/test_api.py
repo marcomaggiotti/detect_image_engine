@@ -41,7 +41,7 @@ def test_detects_cats_by_default(client, png, detector):
         "keypoints": None,
     }
     assert detector.calls[-1]["class_ids"] == frozenset({15})
-    assert detector.calls[-1]["confidence"] == 0.25
+    assert detector.calls[-1]["min_confidence"] == 0.25
 
 
 @pytest.mark.parametrize("query", ["?classes=cat,person", "?classes=cat&classes=person"])

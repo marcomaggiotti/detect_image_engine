@@ -1,10 +1,10 @@
-"""Robustness check: how stable are detections under realistic image changes?
+"""Robustness check: how stable are the detections under realistic image changes?
 
-Each perturbation is applied at a severity from 1 (mild) to 5 (strong). The
-detections on the perturbed image are compared with those on the clean image,
-taken as the reference: a reference object is "kept" when a detection of the
-same class overlaps it with IoU >= 0.5. Geometric perturbations (flip,
-rotation) move the reference boxes with the image.
+Each perturbation is applied at a severity from 1 (mild) to 5 (strong). The detections
+on the perturbed image are compared with those on the clean image, taken as the
+reference: a reference object is *kept* when a detection of the same class overlaps
+it with IoU >= 0.5. Geometric perturbations (flip, rotation) also return how they move
+a box, so that the reference boxes are moved with the image before comparing.
 """
 
 from __future__ import annotations
@@ -14,197 +14,246 @@ import io
 import math
 import random
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter
 
 from app.detectors import Detection
 
-Box = tuple[float, float, float, float]
+Box = tuple[float, float, float, float]  # x1, y1, x2, y2 in pixels
+BoxTransform = Callable[[Box], Box]
+MIN_SEVERITY, MAX_SEVERITY = 1, 5
+MATCH_IOU = 0.5
 
 
-def _brightness(im, s):
-    return ImageEnhance.Brightness(im).enhance(1 - 0.15 * s), None
+@dataclass(frozen=True)
+class Perturbed:
+    image: Image.Image
+    # How the perturbation moves a box; None when boxes stay where they are.
+    move_box: BoxTransform | None = None
 
 
-def _overexpose(im, s):
-    return ImageEnhance.Brightness(im).enhance(1 + 0.25 * s), None
+# --- perturbations: (image, severity 1-5) -> Perturbed --------------------------------
+def darken(image: Image.Image, severity: int) -> Perturbed:
+    return Perturbed(ImageEnhance.Brightness(image).enhance(1 - 0.15 * severity))
 
 
-def _contrast(im, s):
-    return ImageEnhance.Contrast(im).enhance(1 - 0.17 * s), None
+def overexpose(image: Image.Image, severity: int) -> Perturbed:
+    return Perturbed(ImageEnhance.Brightness(image).enhance(1 + 0.25 * severity))
 
 
-def _blur(im, s):
-    return im.filter(ImageFilter.GaussianBlur(radius=0.8 * s)), None
+def lower_contrast(image: Image.Image, severity: int) -> Perturbed:
+    return Perturbed(ImageEnhance.Contrast(image).enhance(1 - 0.17 * severity))
 
 
-def _motion_blur(im, s):
-    # Horizontal box blur of length 4*s+1: a dancer or camera moving sideways.
-    length = 4 * s + 1
-    arr = np.asarray(im).astype(np.float32)
-    pad = np.pad(arr, ((0, 0), (length // 2, length // 2), (0, 0)), mode="edge")
-    csum = np.cumsum(pad, axis=1)
-    csum = np.concatenate([np.zeros_like(csum[:, :1]), csum], axis=1)
-    out = (csum[:, length:] - csum[:, :-length]) / length
-    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)), None
+def gaussian_blur(image: Image.Image, severity: int) -> Perturbed:
+    return Perturbed(image.filter(ImageFilter.GaussianBlur(radius=0.8 * severity)))
 
 
-def _noise(im, s):
-    arr = np.asarray(im).astype(np.float32)
-    rng = np.random.default_rng(0)
-    arr += rng.normal(0, 8 * s, arr.shape)
-    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)), None
+def motion_blur(image: Image.Image, severity: int) -> Perturbed:
+    """Horizontal box blur: a dancer or a camera moving sideways."""
+    blur_length = 4 * severity + 1
+    pixels = np.asarray(image).astype(np.float32)
+    half = blur_length // 2
+    padded = np.pad(pixels, ((0, 0), (half, half), (0, 0)), mode="edge")
+    cumulative = np.cumsum(padded, axis=1)
+    cumulative = np.concatenate([np.zeros_like(cumulative[:, :1]), cumulative], axis=1)
+    blurred = (cumulative[:, blur_length:] - cumulative[:, :-blur_length]) / blur_length
+    return Perturbed(Image.fromarray(np.clip(blurred, 0, 255).astype(np.uint8)))
 
 
-def _jpeg(im, s):
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=max(5, 60 - 11 * s))
-    return Image.open(io.BytesIO(buf.getvalue())).convert("RGB"), None
+def sensor_noise(image: Image.Image, severity: int) -> Perturbed:
+    pixels = np.asarray(image).astype(np.float32)
+    pixels += np.random.default_rng(seed=0).normal(0, 8 * severity, pixels.shape)
+    return Perturbed(Image.fromarray(np.clip(pixels, 0, 255).astype(np.uint8)))
 
 
-def _low_resolution(im, s):
-    w, h = im.size
-    f = 1 / (1 + s)
-    small = im.resize((max(8, int(w * f)), max(8, int(h * f))), Image.BILINEAR)
-    return small.resize((w, h), Image.BILINEAR), None
+def jpeg_compression(image: Image.Image, severity: int) -> Perturbed:
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=max(5, 60 - 11 * severity))
+    return Perturbed(Image.open(io.BytesIO(buffer.getvalue())).convert("RGB"))
 
 
-def _occlusion(im, s):
-    out = im.copy()
-    draw = ImageDraw.Draw(out)
-    w, h = im.size
-    rng = random.Random(s)
-    for _ in range(s * 2):
-        bw, bh = rng.uniform(0.05, 0.15) * w, rng.uniform(0.05, 0.15) * h
-        x, y = rng.uniform(0, w - bw), rng.uniform(0, h - bh)
-        draw.rectangle((x, y, x + bw, y + bh), fill=(110, 110, 110))
-    return out, None
+def low_resolution(image: Image.Image, severity: int) -> Perturbed:
+    width, height = image.size
+    scale = 1 / (1 + severity)
+    small = image.resize((max(8, int(width * scale)), max(8, int(height * scale))), Image.BILINEAR)
+    return Perturbed(small.resize((width, height), Image.BILINEAR))
 
 
-def _hflip(im, s):
-    w, _ = im.size
-
-    def move(b: Box) -> Box:
-        return (w - b[2], b[1], w - b[0], b[3])
-
-    return im.transpose(Image.FLIP_LEFT_RIGHT), move
-
-
-def _rotation(im, s):
-    angle = 4.0 * s
-    w, h = im.size
-    cx, cy = w / 2, h / 2
-    rad = math.radians(angle)
-    cos, sin = math.cos(rad), math.sin(rad)
-
-    def move(b: Box) -> Box:
-        # PIL rotates counter-clockwise; y axis points down.
-        pts = [(b[0], b[1]), (b[2], b[1]), (b[0], b[3]), (b[2], b[3])]
-        xs, ys = [], []
-        for x, y in pts:
-            dx, dy = x - cx, y - cy
-            xs.append(cx + dx * cos + dy * sin)
-            ys.append(cy - dx * sin + dy * cos)
-        return (max(0, min(xs)), max(0, min(ys)), min(w, max(xs)), min(h, max(ys)))
-
-    return im.rotate(angle, resample=Image.BILINEAR, fillcolor=(0, 0, 0)), move
+def occlusion(image: Image.Image, severity: int) -> Perturbed:
+    """Grey rectangles: other dancers, a barre or furniture in front of the body."""
+    occluded = image.copy()
+    draw = ImageDraw.Draw(occluded)
+    width, height = image.size
+    rng = random.Random(severity)
+    for _ in range(2 * severity):
+        block_width, block_height = (
+            rng.uniform(0.05, 0.15) * width,
+            rng.uniform(0.05, 0.15) * height,
+        )
+        left, top = rng.uniform(0, width - block_width), rng.uniform(0, height - block_height)
+        draw.rectangle((left, top, left + block_width, top + block_height), fill=(110, 110, 110))
+    return Perturbed(occluded)
 
 
-PERTURBATIONS: dict[str, Callable] = {
-    "darken": _brightness,
-    "overexpose": _overexpose,
-    "low_contrast": _contrast,
-    "gaussian_blur": _blur,
-    "motion_blur": _motion_blur,
-    "noise": _noise,
-    "jpeg": _jpeg,
-    "low_resolution": _low_resolution,
-    "occlusion": _occlusion,
-    "hflip": _hflip,
-    "rotation": _rotation,
+def horizontal_flip(image: Image.Image, severity: int) -> Perturbed:
+    width = image.width
+
+    def flip_box(box: Box) -> Box:
+        x1, y1, x2, y2 = box
+        return (width - x2, y1, width - x1, y2)
+
+    return Perturbed(image.transpose(Image.FLIP_LEFT_RIGHT), flip_box)
+
+
+def rotation(image: Image.Image, severity: int) -> Perturbed:
+    """Counter-clockwise rotation by 4 degrees per severity level (a tilted phone)."""
+    angle = math.radians(4.0 * severity)
+    width, height = image.size
+    center_x, center_y = width / 2, height / 2
+    cos_angle, sin_angle = math.cos(angle), math.sin(angle)
+
+    def rotate_box(box: Box) -> Box:
+        # The bounding box of the rotated corners (the y axis points down).
+        x1, y1, x2, y2 = box
+        rotated_x, rotated_y = [], []
+        for x, y in ((x1, y1), (x2, y1), (x1, y2), (x2, y2)):
+            dx, dy = x - center_x, y - center_y
+            rotated_x.append(center_x + dx * cos_angle + dy * sin_angle)
+            rotated_y.append(center_y - dx * sin_angle + dy * cos_angle)
+        return (
+            max(0, min(rotated_x)),
+            max(0, min(rotated_y)),
+            min(width, max(rotated_x)),
+            min(height, max(rotated_y)),
+        )
+
+    rotated = image.rotate(math.degrees(angle), resample=Image.BILINEAR, fillcolor=(0, 0, 0))
+    return Perturbed(rotated, rotate_box)
+
+
+# Names used by the API and the web interface.
+PERTURBATIONS: dict[str, Callable[[Image.Image, int], Perturbed]] = {
+    "darken": darken,
+    "overexpose": overexpose,
+    "low_contrast": lower_contrast,
+    "gaussian_blur": gaussian_blur,
+    "motion_blur": motion_blur,
+    "noise": sensor_noise,
+    "jpeg": jpeg_compression,
+    "low_resolution": low_resolution,
+    "occlusion": occlusion,
+    "hflip": horizontal_flip,
+    "rotation": rotation,
 }
 
 
+# --- comparison ---------------------------------------------------------------------
 def iou(a: Box, b: Box) -> float:
-    w = min(a[2], b[2]) - max(a[0], b[0])
-    h = min(a[3], b[3]) - max(a[1], b[1])
-    if w <= 0 or h <= 0:
+    """Intersection over union of two boxes (0 = disjoint, 1 = identical)."""
+    overlap_width = min(a[2], b[2]) - max(a[0], b[0])
+    overlap_height = min(a[3], b[3]) - max(a[1], b[1])
+    if overlap_width <= 0 or overlap_height <= 0:
         return 0.0
-    inter = w * h
-    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
-    return inter / union if union > 0 else 0.0
+    intersection = overlap_width * overlap_height
+    area_a = (a[2] - a[0]) * (a[3] - a[1])
+    area_b = (b[2] - b[0]) * (b[3] - b[1])
+    union = area_a + area_b - intersection
+    return intersection / union if union > 0 else 0.0
 
 
-def compare(reference: list[Detection], found: list[Detection], move=None, thr=0.5) -> dict:
-    used: set[int] = set()
-    ious, conf_deltas = [], []
-    for ref in reference:
-        box = move(ref.box) if move else ref.box
-        best, best_iou = None, thr
-        for i, d in enumerate(found):
-            if i in used or d.label != ref.label:
+def compare_with_reference(
+    reference: list[Detection],
+    found: list[Detection],
+    move_box: BoxTransform | None = None,
+    min_iou: float = MATCH_IOU,
+) -> dict:
+    """Greedy one-to-one matching of reference objects with the new detections."""
+    matched_indexes: set[int] = set()
+    matched_ious, confidence_changes = [], []
+    for expected in reference:
+        expected_box = move_box(expected.box) if move_box else expected.box
+        best_index, best_iou = None, min_iou
+        for index, candidate in enumerate(found):
+            if index in matched_indexes or candidate.label != expected.label:
                 continue
-            v = iou(box, d.box)
-            if v >= best_iou:
-                best, best_iou = i, v
-        if best is not None:
-            used.add(best)
-            ious.append(best_iou)
-            conf_deltas.append(found[best].confidence - ref.confidence)
-    n = len(reference)
+            overlap = iou(expected_box, candidate.box)
+            if overlap >= best_iou:
+                best_index, best_iou = index, overlap
+        if best_index is not None:
+            matched_indexes.add(best_index)
+            matched_ious.append(best_iou)
+            confidence_changes.append(found[best_index].confidence - expected.confidence)
     return {
-        "kept": round(len(ious) / n, 3) if n else None,
-        "mean_iou": round(sum(ious) / len(ious), 3) if ious else None,
-        "mean_conf_delta": round(sum(conf_deltas) / len(conf_deltas), 3) if conf_deltas else None,
-        "new_detections": len(found) - len(used),
+        "kept": _rounded_ratio(len(matched_ious), len(reference)),
+        "mean_iou": _rounded_mean(matched_ious),
+        "mean_conf_delta": _rounded_mean(confidence_changes),
+        "new_detections": len(found) - len(matched_indexes),
     }
 
 
-def preview(image: Image.Image, size: int = 320) -> str:
-    im = image.copy()
-    im.thumbnail((size, size))
-    buf = io.BytesIO()
-    im.save(buf, format="JPEG", quality=70)
-    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+def _rounded_ratio(part: int, total: int) -> float | None:
+    return round(part / total, 3) if total else None
+
+
+def _rounded_mean(values: list[float]) -> float | None:
+    return round(sum(values) / len(values), 3) if values else None
+
+
+def preview_data_url(image: Image.Image, max_side: int = 320) -> str:
+    """A small JPEG of the image as a data URL, for the web interface."""
+    thumbnail = image.copy()
+    thumbnail.thumbnail((max_side, max_side))
+    buffer = io.BytesIO()
+    thumbnail.save(buffer, format="JPEG", quality=70)
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def _describe(detections: list[Detection]) -> list[dict]:
+    return [
+        {
+            "label": detection.label,
+            "confidence": round(detection.confidence, 3),
+            "box": detection.box,
+        }
+        for detection in detections
+    ]
 
 
 def evaluate(
     image: Image.Image,
     detect: Callable[[Image.Image], list[Detection]],
-    perturbations: list[str],
+    perturbation_names: list[str],
     severities: list[int],
     with_previews: bool = True,
 ) -> dict:
-    unknown = [p for p in perturbations if p not in PERTURBATIONS]
-    if unknown:
-        raise ValueError(f"unknown perturbation(s): {', '.join(unknown)}")
+    """Run ``detect`` on the clean image and on every (perturbation, severity) pair."""
+    unknown_names = [name for name in perturbation_names if name not in PERTURBATIONS]
+    if unknown_names:
+        raise ValueError(f"unknown perturbation(s): {', '.join(unknown_names)}")
     reference = detect(image)
     rows = []
-    for name in perturbations:
-        for s in severities:
-            perturbed, move = PERTURBATIONS[name](image, max(1, min(5, int(s))))
-            found = detect(perturbed)
+    for name in perturbation_names:
+        for severity in severities:
+            clamped_severity = max(MIN_SEVERITY, min(MAX_SEVERITY, int(severity)))
+            perturbed = PERTURBATIONS[name](image, clamped_severity)
+            found = detect(perturbed.image)
             rows.append(
                 {
                     "perturbation": name,
-                    "severity": s,
+                    "severity": severity,
                     "detections": len(found),
-                    **compare(reference, found, move),
-                    "boxes": [
-                        {"label": d.label, "confidence": round(d.confidence, 3), "box": d.box}
-                        for d in found
-                    ],
-                    "preview": preview(perturbed) if with_previews else None,
-                    "image_size": list(perturbed.size),
+                    **compare_with_reference(reference, found, perturbed.move_box),
+                    "boxes": _describe(found),
+                    "preview": preview_data_url(perturbed.image) if with_previews else None,
+                    "image_size": list(perturbed.image.size),
                 }
             )
-    kept = [r["kept"] for r in rows if r["kept"] is not None]
+    kept_ratios = [row["kept"] for row in rows if row["kept"] is not None]
     return {
-        "reference": [
-            {"label": d.label, "confidence": round(d.confidence, 3), "box": d.box}
-            for d in reference
-        ],
+        "reference": _describe(reference),
         "results": rows,
-        "robustness_score": round(sum(kept) / len(kept), 3) if kept else None,
+        "robustness_score": _rounded_mean(kept_ratios),
     }

@@ -50,6 +50,7 @@ TRAIN_KEYS = (
     "momentum", "weight_decay", "warmup_epochs", "cos_lr", "seed", "workers", "cache",
     "amp", "dropout", "rect", "single_cls", "multi_scale", "nbs", "plots", "val",
 )  # fmt: skip
+EXPORT_OPTION_KEYS = ("imgsz", "half", "int8", "dynamic", "simplify")
 LOSS_GAINS = ("box", "cls", "dfl", "pose", "kobj")
 AUGMENT_KEYS = (
     "hsv_h", "hsv_s", "hsv_v", "degrees", "translate", "scale", "shear", "perspective",
@@ -72,21 +73,21 @@ def write_json(path: Path, data) -> None:
     tmp.replace(path)
 
 
-def train_arguments(cfg: dict) -> dict:
+def train_arguments(config: dict) -> dict:
     """The keyword arguments passed to Ultralytics ``model.train``."""
-    args = {k: cfg[k] for k in TRAIN_KEYS if cfg.get(k) is not None}
-    loss = cfg.get("loss") or {}
-    args.update({k: loss[k] for k in LOSS_GAINS if loss.get(k) is not None})
-    augment = dict(cfg.get("augment") or {})
+    args = {key: config[key] for key in TRAIN_KEYS if config.get(key) is not None}
+    loss = config.get("loss") or {}
+    args.update({key: loss[key] for key in LOSS_GAINS if loss.get(key) is not None})
+    augment = dict(config.get("augment") or {})
     args.update(preset(augment.pop("preset", None) or "default"))
-    args.update({k: augment[k] for k in AUGMENT_KEYS if augment.get(k) is not None})
+    args.update({key: augment[key] for key in AUGMENT_KEYS if augment.get(key) is not None})
     return args
 
 
-def loss_customization(cfg: dict) -> LossCustomization:
-    loss = cfg.get("loss") or {}
-    assigner = cfg.get("assigner") or {}
-    matcher = cfg.get("matcher") or {}
+def loss_customization(config: dict) -> LossCustomization:
+    loss = config.get("loss") or {}
+    assigner = config.get("assigner") or {}
+    matcher = config.get("matcher") or {}
     return LossCustomization(
         tal_topk=assigner.get("topk"),
         tal_alpha=assigner.get("alpha"),
@@ -100,18 +101,18 @@ def loss_customization(cfg: dict) -> LossCustomization:
     )
 
 
-def base_weights(cfg: dict) -> str:
-    base = cfg.get("base") or "yolo11n.pt"
-    if cfg.get("pretrained", True) is False and base.endswith(".pt"):
+def base_weights(config: dict) -> str:
+    base = config.get("base") or "yolo11n.pt"
+    if config.get("pretrained", True) is False and base.endswith(".pt"):
         # From scratch: same architecture, random weights.
         return base[: -len(".pt")] + ".yaml"
     return base
 
 
-def model_class(cfg: dict):
+def model_class(config: dict):
     from ultralytics import RTDETR, YOLO
 
-    return RTDETR if (cfg.get("arch") or "yolo").lower() == "rtdetr" else YOLO
+    return RTDETR if (config.get("arch") or "yolo").lower() == "rtdetr" else YOLO
 
 
 def box_metrics(metrics, names: dict) -> dict:
@@ -141,15 +142,15 @@ def box_metrics(metrics, names: dict) -> dict:
     return result
 
 
-def run_train(cfg: dict, job_dir: Path, log) -> dict:
-    split_cfg = cfg.get("split") or {}
-    imbalance = cfg.get("imbalance") or {}
+def run_train(config: dict, job_dir: Path, log) -> dict:
+    split_config = config.get("split") or {}
+    imbalance = config.get("imbalance") or {}
     split = build_split(
-        Path(cfg["dataset_dir"]),
+        Path(config["dataset_dir"]),
         job_dir / "dataset",
-        val_fraction=split_cfg.get("val_fraction", 0.2),
-        strategy=split_cfg.get("strategy", "random"),
-        seed=split_cfg.get("seed", 0),
+        val_fraction=split_config.get("val_fraction", 0.2),
+        strategy=split_config.get("strategy", "random"),
+        seed=split_config.get("seed", 0),
         rebalance=imbalance.get("rebalance", "none"),
         rfs_threshold=imbalance.get("threshold", 0.3),
         max_repeat=imbalance.get("max_repeat", 4),
@@ -158,9 +159,9 @@ def run_train(cfg: dict, job_dir: Path, log) -> dict:
     progress = {"stage": "loading model", "split": split}
     write_json(job_dir / "progress.json", progress)
 
-    cls = model_class(cfg)
-    model = cls(base_weights(cfg))
-    install(model, loss_customization(cfg), log=log)
+    cls = model_class(config)
+    model = cls(base_weights(config))
+    install(model, loss_customization(config), log=log)
     started = time.time()
 
     def on_fit_epoch_end(trainer):
@@ -183,7 +184,7 @@ def run_train(cfg: dict, job_dir: Path, log) -> dict:
         write_json(job_dir / "progress.json", progress)
 
     model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
-    args = train_arguments(cfg)
+    args = train_arguments(config)
     log(f"Train arguments: {json.dumps(args)}")
     model.train(
         data=split["yaml"],
@@ -197,7 +198,7 @@ def run_train(cfg: dict, job_dir: Path, log) -> dict:
     progress["stage"] = "validating"
     write_json(job_dir / "progress.json", progress)
     tuned = cls(best)
-    val = cfg.get("val") or {}
+    val = config.get("val") or {}
     metrics = tuned.val(
         data=split["yaml"],
         imgsz=args.get("imgsz", 640),
@@ -217,30 +218,32 @@ def run_train(cfg: dict, job_dir: Path, log) -> dict:
         "split": split,
         "train_seconds": round(time.time() - started, 1),
     }
-    if cfg.get("export"):
+    if config.get("export"):
         summary["exported"] = str(
-            tuned.export(format=cfg["export"], imgsz=args.get("imgsz", 640), half=cfg.get("half"))
+            tuned.export(
+                format=config["export"], imgsz=args.get("imgsz", 640), half=config.get("half")
+            )
         )
     return summary
 
 
-def run_export(cfg: dict, job_dir: Path, log) -> dict:
-    model = model_class(cfg)(cfg["weights"])
-    kwargs = {k: cfg[k] for k in ("imgsz", "half", "int8", "dynamic", "simplify") if k in cfg}
-    log(f"Exporting {cfg['weights']} to {cfg['format']} {kwargs}")
+def run_export(config: dict, job_dir: Path, log) -> dict:
+    model = model_class(config)(config["weights"])
+    export_options = {key: config[key] for key in EXPORT_OPTION_KEYS if key in config}
+    log(f"Exporting {config['weights']} to {config['format']} {export_options}")
     started = time.time()
-    path = model.export(format=cfg["format"], **kwargs)
+    path = model.export(format=config["format"], **export_options)
     return {"exported": str(path), "seconds": round(time.time() - started, 1)}
 
 
-def run_val(cfg: dict, job_dir: Path, log) -> dict:
-    split = build_split(Path(cfg["dataset_dir"]), job_dir / "dataset", val_fraction=1.0)
-    model = model_class(cfg)(cfg["weights"])
+def run_val(config: dict, job_dir: Path, log) -> dict:
+    split = build_split(Path(config["dataset_dir"]), job_dir / "dataset", val_fraction=1.0)
+    model = model_class(config)(config["weights"])
     metrics = model.val(
         data=split["yaml"],
-        imgsz=cfg.get("imgsz", 640),
-        conf=cfg.get("conf", 0.001),
-        iou=cfg.get("iou", 0.7),
+        imgsz=config.get("imgsz", 640),
+        conf=config.get("conf", 0.001),
+        iou=config.get("iou", 0.7),
         project=str(job_dir.resolve()),
         name="val",
         exist_ok=True,
@@ -259,13 +262,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--job-dir", required=True, type=Path)
     args = p.parse_args(argv)
     job_dir: Path = args.job_dir
-    cfg = json.loads((job_dir / "config.json").read_text())
+    config = json.loads((job_dir / "config.json").read_text())
 
     def log(message: str) -> None:
         print(message, flush=True)
 
     try:
-        summary = RUNNERS[cfg.get("kind", "train")](cfg, job_dir, log)
+        summary = RUNNERS[config.get("kind", "train")](config, job_dir, log)
     except Exception as exc:  # noqa: BLE001 - reported to the API
         traceback.print_exc()
         write_json(job_dir / "summary.json", {"error": f"{type(exc).__name__}: {exc}"})

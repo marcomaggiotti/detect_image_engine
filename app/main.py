@@ -41,26 +41,26 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        model = detector or build_detector(settings)
+        active_detector = detector or build_detector(settings)
         app.state.settings = settings
         app.state.service = DetectionService(
-            model,
+            active_detector,
             default_classes=settings.target_classes,
             confidence_threshold=settings.confidence_threshold,
             max_image_pixels=settings.max_image_pixels,
         )
         if settings.lab_enabled:
-            from app.lab.routes import Lab
+            from app.lab.state import LabState
 
-            app.state.lab = Lab(settings)
+            app.state.lab = LabState(settings)
         if settings.warmup:
-            model.warmup()
+            active_detector.warmup()
         logger.info(
             "Loaded %s model %s (%d classes), default classes: %s",
-            model.backend_name,
+            active_detector.backend_name,
             settings.model_weights,
-            len(model.labels),
-            app.state.service.default_selection.names or "all",
+            len(active_detector.labels),
+            app.state.service.default_class_filter.class_names or "all",
         )
         yield
 
@@ -72,9 +72,11 @@ def create_app(settings: Settings | None = None, detector: Detector | None = Non
     )
     app.include_router(router)
     if settings.lab_enabled:
-        from app.lab.routes import router as lab_router
+        from app.lab.api import register_error_handlers
+        from app.lab.api import router as lab_router
 
         app.include_router(lab_router)
+        register_error_handlers(app)
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

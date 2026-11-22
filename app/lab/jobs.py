@@ -23,8 +23,12 @@ import app
 REPO_ROOT = Path(app.__file__).resolve().parent.parent
 
 
-class JobError(RuntimeError):
-    pass
+class JobConflictError(RuntimeError):
+    """The job cannot be started or cancelled in its current state."""
+
+
+class JobNotFoundError(LookupError):
+    """No job, or no such file in a job's folder."""
 
 
 class JobManager:
@@ -37,7 +41,7 @@ class JobManager:
     def _dir(self, job_id: str) -> Path:
         path = self.root / Path(job_id).name
         if not (path / "config.json").is_file():
-            raise LookupError(f"job {job_id!r} not found")
+            raise JobNotFoundError(f"job {job_id!r} not found")
         return path
 
     def running(self) -> str | None:
@@ -49,7 +53,7 @@ class JobManager:
 
     def start(self, config: dict, name: str | None = None) -> dict:
         if (busy := self.running()) is not None:
-            raise JobError(f"job {busy} is still running; wait or cancel it")
+            raise JobConflictError(f"job {busy} is still running; wait or cancel it")
         job_id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         path = self.root / job_id
         path.mkdir(parents=True)
@@ -92,7 +96,7 @@ class JobManager:
         with self._lock:
             proc = self._procs.get(job_id)
         if proc is None or proc.poll() is not None:
-            raise JobError("job is not running")
+            raise JobConflictError("job is not running")
         (path / "status.json").write_text(
             json.dumps({"returncode": -15, "cancelled": True, "finished": time.time()})
         )
@@ -133,9 +137,9 @@ class JobManager:
         if not self.root.exists():
             return []
         jobs = []
-        for d in sorted(self.root.iterdir(), reverse=True):
-            if (d / "config.json").is_file():
-                job = self.get(d.name)
+        for job_dir in sorted(self.root.iterdir(), reverse=True):
+            if (job_dir / "config.json").is_file():
+                job = self.get(job_dir.name)
                 job.pop("config", None)
                 jobs.append(job)
         return jobs
@@ -173,7 +177,7 @@ class JobManager:
             candidate = path / folder / Path(name).name
             if candidate.is_file():
                 return candidate
-        raise LookupError(name)
+        raise JobNotFoundError(f"no file {name!r} in job {job_id!r}")
 
     def artifacts(self, job_id: str) -> list[str]:
         path = self._dir(job_id)
@@ -181,7 +185,9 @@ class JobManager:
         for folder in ("train", "val"):
             if (path / folder).is_dir():
                 names.update(
-                    p.name for p in (path / folder).iterdir() if p.suffix in {".png", ".jpg"}
+                    file.name
+                    for file in (path / folder).iterdir()
+                    if file.suffix in {".png", ".jpg"}
                 )
         return sorted(names)
 

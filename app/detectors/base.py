@@ -18,6 +18,8 @@ from PIL import Image
 
 @dataclass(frozen=True)
 class Detection:
+    """One object found by a model."""
+
     label: str
     class_id: int
     confidence: float
@@ -29,6 +31,8 @@ class Detection:
 
 @dataclass(frozen=True)
 class DetectorConfig:
+    """Model settings shared by every backend."""
+
     weights: str
     arch: str | None = None
     labels_file: str | None = None
@@ -57,24 +61,25 @@ class Detector(ABC):
         """Class id -> class name for every class the model can detect."""
 
     @abstractmethod
-    def detect(
+    def predict(
         self,
         image: Image.Image,
         *,
-        confidence: float,
+        min_confidence: float,
         class_ids: Collection[int] | None = None,
     ) -> list[Detection]:
-        """Detect objects in an RGB image.
+        """Run the model on an RGB image.
 
-        Only detections with score >= ``confidence`` are returned. When
-        ``class_ids`` is given, only those classes are returned.
+        Only detections scoring at least ``min_confidence`` are returned; when
+        ``class_ids`` is given, only those classes.
         """
 
     def warmup(self) -> None:
-        self.detect(Image.new("RGB", (64, 64)), confidence=1.0)
+        """Run one inference so that the first real request is not slowed down by lazy loading."""
+        self.predict(Image.new("RGB", (64, 64)), min_confidence=1.0)
 
 
 def load_labels(path: str | Path) -> dict[int, str]:
     """Read a label file: one class name per line, line index = class id."""
     lines = Path(path).read_text(encoding="utf-8").splitlines()
-    return {i: name.strip() for i, name in enumerate(lines) if name.strip()}
+    return {class_id: name.strip() for class_id, name in enumerate(lines) if name.strip()}

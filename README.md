@@ -257,7 +257,7 @@ class MyDetector(Detector):
     def labels(self) -> dict[int, str]:
         return {0: "cat", 1: "dog"}
 
-    def detect(self, image, *, confidence, class_ids=None):
+    def predict(self, image, *, min_confidence, class_ids=None):
         ...  # return list[Detection] in pixel xyxy
 ```
 
@@ -291,6 +291,32 @@ The repo includes a Render Blueprint, [`render.yaml`](render.yaml). In the Rende
 - **Region:** `oregon`. Change `region` in `render.yaml` to deploy elsewhere.
 - **Settings:** edit the `envVars` in `render.yaml`, or change them in the dashboard.
 - **Fine-tuned model:** Render's filesystem is reset on every deploy. Either copy `best.pt` into the image, or uncomment the `disk` block, upload the file there and set `DETECT_MODEL_WEIGHTS=/var/data/models/best.pt`.
+
+## Code structure
+
+```
+app/
+  main.py              app factory: settings, detector, service, routers
+  config.py            settings from DETECT_* environment variables
+  service.py           DetectionService: input validation, class filter, thresholds, locking
+  imaging.py           safe decoding of uploads (size limit, EXIF orientation, RGB)
+  detectors/
+    base.py            Detector interface (labels, predict) and the Detection value object
+    registry.py        backend name -> Detector class
+    ultralytics_backend.py, torchvision_backend.py
+  api/routes.py        /health, /v1/model, /v1/detect, /v1/info
+  lab/                 optional: datasets, training jobs, robustness, latency
+    state.py           LabState: datasets, jobs, weights on disk
+    datasets.py        DatasetStore (YOLO-format folders)
+    jobs.py            JobManager (training/validation/export in a child process)
+    model_switch.py, prelabel.py, benchmark.py, robustness.py, options.py
+    api/               thin HTTP routers, Pydantic request models, error -> status mapping
+training/              run_job.py (used by the lab), finetune.py, prepare.py, splits.py
+```
+
+Layers depend inward only: `api` -> `service` -> `detectors`. The HTTP layer validates
+requests with Pydantic and maps domain errors (`DatasetNotFoundError`, `JobConflictError`,
+...) to status codes in one place (`app/lab/api/errors.py`).
 
 ## Development
 

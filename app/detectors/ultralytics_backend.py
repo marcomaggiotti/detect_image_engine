@@ -27,10 +27,10 @@ class UltralyticsDetector(Detector):
         os.environ.setdefault("YOLO_AUTOINSTALL", "false")
         from ultralytics import RTDETR, YOLO
 
-        arch = (config.arch or "yolo").lower()
-        if arch == "rtdetr":
+        architecture = (config.arch or "yolo").lower()
+        if architecture == "rtdetr":
             self._model = RTDETR(config.weights)
-        elif arch == "yolo":
+        elif architecture == "yolo":
             self._model = YOLO(config.weights)
         else:
             raise ValueError(
@@ -52,59 +52,68 @@ class UltralyticsDetector(Detector):
     def labels(self) -> dict[int, str]:
         return self._labels
 
-    def detect(
+    def predict(
         self,
         image: Image.Image,
         *,
-        confidence: float,
+        min_confidence: float,
         class_ids: Collection[int] | None = None,
     ) -> list[Detection]:
-        cfg = self.config
+        settings = self.config
         results = self._model.predict(
             image,
-            conf=confidence,
-            iou=cfg.iou_threshold,
-            imgsz=cfg.image_size,
-            max_det=cfg.max_detections,
+            conf=min_confidence,
+            iou=settings.iou_threshold,
+            imgsz=settings.image_size,
+            max_det=settings.max_detections,
             classes=sorted(class_ids) if class_ids is not None else None,
-            device=cfg.device,
+            device=settings.device,
             verbose=False,
-            # Only passed when on: recent Ultralytics versions deprecate the flag.
-            **({"half": True} if cfg.half else {}),
+            # Only passed when enabled: recent Ultralytics versions deprecate the flag.
+            **({"half": True} if settings.half else {}),
         )
-        boxes = results[0].boxes
-        if boxes is None or len(boxes) == 0:
+        result = results[0]
+        if result.boxes is None or len(result.boxes) == 0:
             return []
 
-        keypoints: list = [None] * len(boxes)
-        kpts = results[0].keypoints
-        if kpts is not None and kpts.xy is not None:
-            xy = kpts.xy.cpu().tolist()
-            vis = kpts.conf.cpu().tolist() if kpts.conf is not None else None
-            keypoints = [
-                tuple(
-                    (float(x), float(y), float(vis[i][k]) if vis else 1.0)
-                    for k, (x, y) in enumerate(points)
-                )
-                for i, points in enumerate(xy)
-            ]
-
+        keypoints_per_object = _keypoints_per_object(result.keypoints, len(result.boxes))
         detections = []
-        for xyxy, score, cls, kp in zip(
-            boxes.xyxy.cpu().tolist(),
-            boxes.conf.cpu().tolist(),
-            boxes.cls.cpu().tolist(),
-            keypoints,
+        for corners, score, class_index, keypoints in zip(
+            result.boxes.xyxy.cpu().tolist(),
+            result.boxes.conf.cpu().tolist(),
+            result.boxes.cls.cpu().tolist(),
+            keypoints_per_object,
             strict=True,
         ):
-            class_id = int(cls)
+            class_id = int(class_index)
             detections.append(
                 Detection(
                     label=self._labels.get(class_id, str(class_id)),
                     class_id=class_id,
                     confidence=float(score),
-                    box=tuple(float(v) for v in xyxy),
-                    keypoints=kp,
+                    box=tuple(float(value) for value in corners),
+                    keypoints=keypoints,
                 )
             )
         return detections
+
+
+Keypoints = tuple[tuple[float, float, float], ...]
+
+
+def _keypoints_per_object(keypoints, object_count: int) -> list[Keypoints | None]:
+    """Ultralytics keypoints as one tuple of (x, y, visibility) per detected object.
+
+    Detection-only models have no keypoints: the list then holds ``None`` per object.
+    """
+    if keypoints is None or keypoints.xy is None:
+        return [None] * object_count
+    positions = keypoints.xy.cpu().tolist()
+    visibilities = keypoints.conf.cpu().tolist() if keypoints.conf is not None else None
+    return [
+        tuple(
+            (float(x), float(y), float(visibilities[obj][point]) if visibilities else 1.0)
+            for point, (x, y) in enumerate(object_positions)
+        )
+        for obj, object_positions in enumerate(positions)
+    ]
