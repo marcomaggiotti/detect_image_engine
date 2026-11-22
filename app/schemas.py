@@ -17,6 +17,10 @@ class DetectionOut(BaseModel):
     class_id: int
     confidence: float
     box: Box
+    keypoints: list[list[float]] | None = Field(
+        default=None,
+        description="Pose models only: [x, y, visibility] per keypoint (COCO-17 order).",
+    )
 
 
 class ImageInfo(BaseModel):
@@ -44,6 +48,7 @@ class DetectResponse(BaseModel):
 
 class ModelInfo(ModelRef):
     arch: str | None = None
+    task: str = "detect"
     default_classes: list[str] | None
     confidence_threshold: float
     labels: dict[int, str]

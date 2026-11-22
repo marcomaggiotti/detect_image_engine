@@ -62,6 +62,13 @@ Box coordinates are pixels of the uploaded image, after EXIF rotation is applied
 | `POST` | `/v1/detect` | Multipart upload, field `image`. Returns detections. |
 | `GET` | `/v1/model` | Active backend, weights, version, default classes and every label the model knows. |
 | `GET` | `/health` | Liveness check. |
+| `GET` | `/v1/info` | Module descriptor (used by the MultiVision AI Manager). |
+| `GET` | `/ui/` | Standalone web page: upload a picture, tune thresholds, see boxes and skeletons. |
+
+**Pose models.** With pose weights (e.g. `DETECT_MODEL_WEIGHTS=yolo11n-pose.pt`) every
+detection also carries `keypoints`: 17 `[x, y, visibility]` triples in COCO order
+(nose, eyes, ears, shoulders, elbows, wrists, hips, knees, ankles). `/v1/model` reports
+`"task": "pose"`.
 
 `/v1/detect` query parameters:
 
@@ -71,6 +78,23 @@ Box coordinates are pixels of the uploaded image, after EXIF rotation is applied
 | `confidence` | `0.5` | Minimum score (0–1). Defaults to `DETECT_CONFIDENCE_THRESHOLD`. |
 
 Errors: `400` for an invalid/corrupt image or unknown class, `413` for an upload over the size limit, `422` for an invalid parameter.
+
+## Lab: datasets, annotation, training, robustness, latency
+
+Everything under `/v1/lab` (turn it off with `DETECT_LAB_ENABLED=false`). Data lives in
+`DETECT_DATA_DIR` (`/data` in Docker).
+
+| Area | Endpoints | What you can customise |
+| --- | --- | --- |
+| Runtime | `GET/PUT /v1/lab/runtime`, `GET /v1/lab/weights`, `PUT /v1/lab/model`, `GET /v1/lab/system` | Confidence and **NMS IoU thresholds**, input size, max detections, FP16; switch weights (pretrained, `job:<id>` fine-tuned, exported) without restarting |
+| Datasets | `/v1/lab/datasets[/{id}[/images, /labels/{file}, /stats, /autolabel, /import, /export]]` | **Annotation** (boxes, pose keypoints) in YOLO format; pre-labelling with the active model; **class-imbalance** statistics and suggested class weights |
+| Training | `GET /v1/lab/options`, `POST /v1/lab/jobs`, `/v1/lab/jobs/{id}[/log, /results, /artifacts, /cancel]` | **Transfer learning / fine-tuning** (base model, pretrained or scratch, frozen layers, optimiser, LR schedule); **loss gains** (box regression, classification/objectness, DFL, pose); **focal loss and per-class weights**; **assignment strategy** (Task-Aligned Assigner top-k/alpha/beta, RT-DETR matcher costs); **augmentation** (presets incl. `ballet-studio`, every parameter); **repeat-factor sampling**; validation IoU; export |
+| Robustness | `POST /v1/lab/robustness` | Darkening, over-exposure, contrast, blur, motion blur, noise, JPEG, low resolution, occlusion, flip, rotation, at severities 1-5; reports how many reference detections are kept |
+| Latency | `POST /v1/lab/benchmark`, `POST /v1/lab/jobs {"kind": "export"}` | Mean/p50/p95 latency and FPS per input size, FP32 vs FP16; export to ONNX, TensorRT (`engine`), OpenVINO |
+
+`GET /v1/lab/options` describes every training option (default, range, meaning); the web
+interfaces build their forms from it. Jobs run one at a time in a child process
+(`python -m training.run_job --job-dir ...`), which can also be run by hand.
 
 ## Configuration
 
@@ -233,7 +257,7 @@ class MyDetector(Detector):
     def labels(self) -> dict[int, str]:
         return {0: "cat", 1: "dog"}
 
-    def detect(self, image, *, confidence, class_ids=None):
+    def predict(self, image, *, min_confidence, class_ids=None):
         ...  # return list[Detection] in pixel xyxy
 ```
 
@@ -267,6 +291,32 @@ The repo includes a Render Blueprint, [`render.yaml`](render.yaml). In the Rende
 - **Region:** `oregon`. Change `region` in `render.yaml` to deploy elsewhere.
 - **Settings:** edit the `envVars` in `render.yaml`, or change them in the dashboard.
 - **Fine-tuned model:** Render's filesystem is reset on every deploy. Either copy `best.pt` into the image, or uncomment the `disk` block, upload the file there and set `DETECT_MODEL_WEIGHTS=/var/data/models/best.pt`.
+
+## Code structure
+
+```
+app/
+  main.py              app factory: settings, detector, service, routers
+  config.py            settings from DETECT_* environment variables
+  service.py           DetectionService: input validation, class filter, thresholds, locking
+  imaging.py           safe decoding of uploads (size limit, EXIF orientation, RGB)
+  detectors/
+    base.py            Detector interface (labels, predict) and the Detection value object
+    registry.py        backend name -> Detector class
+    ultralytics_backend.py, torchvision_backend.py
+  api/routes.py        /health, /v1/model, /v1/detect, /v1/info
+  lab/                 optional: datasets, training jobs, robustness, latency
+    state.py           LabState: datasets, jobs, weights on disk
+    datasets.py        DatasetStore (YOLO-format folders)
+    jobs.py            JobManager (training/validation/export in a child process)
+    model_switch.py, prelabel.py, benchmark.py, robustness.py, options.py
+    api/               thin HTTP routers, Pydantic request models, error -> status mapping
+training/              run_job.py (used by the lab), finetune.py, prepare.py, splits.py
+```
+
+Layers depend inward only: `api` -> `service` -> `detectors`. The HTTP layer validates
+requests with Pydantic and maps domain errors (`DatasetNotFoundError`, `JobConflictError`,
+...) to status codes in one place (`app/lab/api/errors.py`).
 
 ## Development
 

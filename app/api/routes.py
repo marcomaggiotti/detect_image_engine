@@ -6,6 +6,7 @@ from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile, 
 from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings
+from app.detectors import Detection
 from app.imaging import InvalidImageError
 from app.schemas import (
     Box,
@@ -38,17 +39,34 @@ def _model_ref(request: Request) -> ModelRef:
     )
 
 
-def _parse_classes(raw: list[str] | None) -> list[str] | None:
+def _parse_class_names(query_values: list[str] | None) -> list[str] | None:
     """Accept both ?classes=cat,dog and ?classes=cat&classes=dog."""
-    if not raw:
+    if not query_values:
         return None
-    names = [part.strip() for item in raw for part in item.split(",") if part.strip()]
-    return names or None
+    class_names = [
+        name.strip() for value in query_values for name in value.split(",") if name.strip()
+    ]
+    return class_names or None
 
 
-def _box(xyxy: tuple[float, float, float, float]) -> Box:
-    x1, y1, x2, y2 = (round(v, 1) for v in xyxy)
+def _to_box(corners: tuple[float, float, float, float]) -> Box:
+    x1, y1, x2, y2 = (round(value, 1) for value in corners)
     return Box(x1=x1, y1=y1, x2=x2, y2=y2)
+
+
+def _to_detection_out(detection: Detection) -> DetectionOut:
+    keypoints = (
+        [[round(value, 2) for value in keypoint] for keypoint in detection.keypoints]
+        if detection.keypoints
+        else None
+    )
+    return DetectionOut(
+        label=detection.label,
+        class_id=detection.class_id,
+        confidence=round(detection.confidence, 4),
+        box=_to_box(detection.box),
+        keypoints=keypoints,
+    )
 
 
 @router.get("/health", tags=["ops"])
@@ -62,7 +80,8 @@ def model_info(request: Request) -> ModelInfo:
     return ModelInfo(
         **_model_ref(request).model_dump(),
         arch=_settings(request).model_arch,
-        default_classes=service.default_selection.names,
+        task=service.detector.task,
+        default_classes=service.default_class_filter.class_names,
         confidence_threshold=service.confidence_threshold,
         labels=service.detector.labels,
     )
@@ -95,13 +114,16 @@ async def detect(
     service = _service(request)
     max_bytes = _settings(request).max_upload_bytes
 
-    data = await image.read(max_bytes + 1)
-    if len(data) > max_bytes:
+    image_bytes = await image.read(max_bytes + 1)
+    if len(image_bytes) > max_bytes:
         raise HTTPException(413, f"Image exceeds {max_bytes} bytes")
 
     try:
         result = await run_in_threadpool(
-            service.detect, data, classes=_parse_classes(classes), confidence=confidence
+            service.detect_in_upload,
+            image_bytes,
+            class_names=_parse_class_names(classes),
+            min_confidence=confidence,
         )
     except UnknownClassError as exc:
         raise HTTPException(
@@ -112,18 +134,10 @@ async def detect(
 
     return DetectResponse(
         model=_model_ref(request),
-        image=ImageInfo(width=result.width, height=result.height),
-        classes=result.classes,
+        image=ImageInfo(width=result.image_width, height=result.image_height),
+        classes=result.class_names,
         found=bool(result.detections),
-        counts=result.counts,
-        detections=[
-            DetectionOut(
-                label=d.label,
-                class_id=d.class_id,
-                confidence=round(d.confidence, 4),
-                box=_box(d.box),
-            )
-            for d in result.detections
-        ],
+        counts=result.counts_by_label,
+        detections=[_to_detection_out(detection) for detection in result.detections],
         inference_ms=result.inference_ms,
     )

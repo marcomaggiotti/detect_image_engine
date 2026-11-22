@@ -47,6 +47,32 @@ PRESETS: dict[str, dict[str, float]] = {
         "mosaic": 1.0,
         "close_mosaic": 10,
     },
+    # Classical ballet in a studio or on stage:
+    # - dancers are upright and the floor is level: small rotation only (a
+    #   tilted phone), never upside down;
+    # - left-right flip is safe: steps are performed on both sides (for pose
+    #   models the keypoints are swapped with flip_idx);
+    # - stage lighting changes colour and brightness a lot;
+    # - mosaic/mixup create impossible overlaps of bodies and hide the line of
+    #   the legs, so they are kept low; random erasing simulates other dancers
+    #   and barres in front of the body.
+    "ballet-studio": {
+        "hsv_h": 0.02,
+        "hsv_s": 0.6,
+        "hsv_v": 0.5,
+        "degrees": 5.0,
+        "shear": 0.0,
+        "perspective": 0.0,
+        "flipud": 0.0,
+        "fliplr": 0.5,
+        "translate": 0.1,
+        "scale": 0.4,
+        "mosaic": 0.5,
+        "close_mosaic": 10,
+        "mixup": 0.0,
+        "copy_paste": 0.0,
+        "erasing": 0.3,
+    },
 }
 
 

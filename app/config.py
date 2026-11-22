@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     iou_threshold: float = Field(0.45, ge=0.0, le=1.0)
     image_size: int = Field(640, gt=0)
     max_detections: int = Field(100, gt=0)
+    half: bool = False
+
+    # --- Lab (datasets, training jobs, benchmarks) ------------------------
+    # Root folder for datasets, training runs, downloaded and exported weights.
+    data_dir: str = "data"
+    # Disable to serve inference only (e.g. on a small cloud instance).
+    lab_enabled: bool = True
+    # Origins allowed to call the API from a browser (comma separated, "*" = any).
+    cors_origins: Annotated[list[str], NoDecode] = []
 
     # --- Input limits ------------------------------------------------------
     max_upload_bytes: int = Field(10 * 1024 * 1024, gt=0)
@@ -55,7 +64,7 @@ class Settings(BaseSettings):
     # does not pay for lazy initialisation.
     warmup: bool = True
 
-    @field_validator("target_classes", mode="before")
+    @field_validator("target_classes", "cors_origins", mode="before")
     @classmethod
     def _split_classes(cls, value: object) -> object:
         if isinstance(value, str):

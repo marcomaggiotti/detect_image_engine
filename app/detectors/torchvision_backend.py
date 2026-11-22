@@ -71,28 +71,28 @@ class TorchvisionDetector(Detector):
     def labels(self) -> dict[int, str]:
         return self._labels
 
-    def detect(
+    def predict(
         self,
         image: Image.Image,
         *,
-        confidence: float,
+        min_confidence: float,
         class_ids: Collection[int] | None = None,
     ) -> list[Detection]:
         from torchvision.transforms.functional import to_tensor
 
-        tensor = to_tensor(image).to(self._device)
+        image_tensor = to_tensor(image).to(self._device)
         with self._torch.inference_mode():
-            output = self._model([tensor])[0]
+            output = self._model([image_tensor])[0]
 
         detections = []
-        for xyxy, score, cls in zip(
+        for corners, score, class_index in zip(
             output["boxes"].cpu().tolist(),
             output["scores"].cpu().tolist(),
             output["labels"].cpu().tolist(),
             strict=True,
         ):
-            class_id = int(cls)
-            if score < confidence or class_id not in self._labels:
+            class_id = int(class_index)
+            if score < min_confidence or class_id not in self._labels:
                 continue
             if class_ids is not None and class_id not in class_ids:
                 continue
@@ -101,8 +101,8 @@ class TorchvisionDetector(Detector):
                     label=self._labels[class_id],
                     class_id=class_id,
                     confidence=float(score),
-                    box=tuple(float(v) for v in xyxy),
+                    box=tuple(float(value) for value in corners),
                 )
             )
-        detections.sort(key=lambda d: d.confidence, reverse=True)
+        detections.sort(key=lambda detection: detection.confidence, reverse=True)
         return detections[: self.config.max_detections]
