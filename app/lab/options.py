@@ -326,7 +326,12 @@ GROUPS = [
 
 
 def options() -> dict:
-    return {"base_models": BASE_MODELS, "groups": GROUPS, "presets": PRESETS}
+    return {
+        "base_models": BASE_MODELS,
+        "groups": GROUPS,
+        "presets": PRESETS,
+        "tunable": sorted(tunable_options()),  # what a hyperparameter search may vary
+    }
 
 
 TUNABLE_KINDS = {"number", "bool", "choice"}
