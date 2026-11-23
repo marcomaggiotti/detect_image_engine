@@ -221,3 +221,32 @@ def test_jobs_run_in_a_subprocess_and_report_failure(lab_client, monkeypatch):
     assert json.loads(json.dumps(lab_client.get("/v1/lab/jobs").json()))[0]["id"] == job_id
     assert lab_client.get(f"/v1/lab/jobs/{job_id}/log").status_code == 200
     assert lab_client.post("/v1/lab/jobs", json={"kind": "train"}).status_code == 422
+
+
+def test_tuning_jobs_are_checked_before_they_start(lab_client):
+    make_dataset(lab_client, n=2)
+
+    def tune(*parameters, strategy="grid"):
+        search = {"strategy": strategy, "parameters": list(parameters), "trial_epochs": 1}
+        return lab_client.post(
+            "/v1/lab/jobs", json={"kind": "tune", "dataset": "ballet", "search": search}
+        )
+
+    assert "not a tunable" in tune({"key": "warp_speed", "values": [1]}).json()["detail"]
+    assert "not a tunable" in tune({"key": "epochs", "values": [1, 2]}).json()["detail"]
+    assert "outside" in tune({"key": "augment.mosaic", "values": [0.5, 3]}).json()["detail"]
+    assert "list the values" in tune({"key": "lr0", "min": 0.001, "max": 0.1}).json()["detail"]
+    assert "choose among" in tune({"key": "optimizer", "values": ["teleport"]}).json()["detail"]
+    assert (
+        lab_client.post("/v1/lab/jobs", json={"kind": "tune", "dataset": "ballet"}).status_code
+        == 422
+    )
+
+    job = tune({"key": "lr0", "min": 0.001, "max": 0.1, "log": True}, strategy="random")
+    assert job.status_code == 201, job.text
+    config = job.json()["config"]
+    assert config["kind"] == "tune" and config["search"]["parameters"][0]["log"] is True
+    for _ in range(200):  # no ultralytics training here: the job fails, but it ran
+        if lab_client.get(f"/v1/lab/jobs/{job.json()['id']}").json()["status"] != "running":
+            break
+        time.sleep(0.1)

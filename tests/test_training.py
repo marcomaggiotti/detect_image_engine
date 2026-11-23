@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -125,3 +126,87 @@ def test_prepare_without_auto_label_warns_about_missing_empty_frames(tmp_path):
     assert any("one day" in w for w in report["warnings"])
     assert any("no 'luna' in validation" in w for w in report["warnings"])
     assert PRESETS  # imported for the CLI choices
+
+
+# --- hyperparameter search ---------------------------------------------------------
+def test_grid_and_random_plans():
+    from training.tuning import merge, nest, plan_trials
+
+    grid = plan_trials({"strategy": "grid", "parameters": [
+        {"key": "lr0", "values": [0.001, 0.01]}, {"key": "augment.mosaic", "values": [0.5, 1.0]},
+    ]})  # fmt: skip
+    assert len(grid) == 4 and {"lr0": 0.01, "augment.mosaic": 0.5} in grid
+    with pytest.raises(ValueError, match="at most 3"):
+        plan_trials(
+            {
+                "strategy": "grid",
+                "trials": 3,
+                "parameters": [{"key": "lr0", "values": [1, 2, 3, 4]}],
+            }
+        )
+
+    draws = plan_trials({"strategy": "random", "trials": 20, "parameters": [
+        {"key": "lr0", "min": 0.0001, "max": 0.1, "log": True},
+        {"key": "freeze", "min": 0, "max": 10, "integer": True},
+    ]}, seed=1)  # fmt: skip
+    assert len(draws) == 20 and all(
+        0.0001 <= d["lr0"] <= 0.1 and isinstance(d["freeze"], int) for d in draws
+    )
+    assert sum(d["lr0"] < 0.01 for d in draws) >= 8  # log scale: small rates are drawn often
+    assert draws == plan_trials({"strategy": "random", "trials": 20, "parameters": [
+        {"key": "lr0", "min": 0.0001, "max": 0.1, "log": True},
+        {"key": "freeze", "min": 0, "max": 10, "integer": True},
+    ]}, seed=1)  # fmt: skip
+
+    merged = merge(
+        {"loss": {"box": 7.5, "cls": 0.5}, "lr0": 0.01}, nest({"loss.box": 5, "lr0": 0.1})
+    )
+    assert merged == {"loss": {"box": 5, "cls": 0.5}, "lr0": 0.1}
+
+
+def test_run_tune_keeps_the_best_trial_and_survives_failures(tmp_path):
+    from training.run_job import write_json
+    from training.tuning import run_tune
+
+    seen = []
+
+    def fake_train(config, job_dir, log):
+        seen.append(config)
+        if config["lr0"] == 0.1:
+            raise RuntimeError("diverged")
+        score = {0.001: 0.41, 0.01: 0.55}[config["lr0"]] + (
+            0.02 if config["augment"]["mosaic"] == 1.0 else 0
+        )
+        return {
+            "weights": str(job_dir / "best.pt"),
+            "metrics": {"pose": {"map50_95": score}, "box": {"map50_95": 0.9}},
+        }
+
+    parameters = [
+        {"key": "lr0", "values": [0.001, 0.01, 0.1]},
+        {"key": "augment.mosaic", "values": [0.5, 1.0]},
+    ]
+    search = {"strategy": "grid", "objective": "pose.map50_95", "trial_epochs": 5}
+    config = {
+        "kind": "tune", "dataset_dir": "d", "epochs": 100,
+        "augment": {"preset": "ballet-studio", "mosaic": 1.0},
+        "search": {**search, "parameters": parameters},
+    }  # fmt: skip
+    summary = run_tune(
+        config, tmp_path, lambda message: None, train=fake_train, write_json=write_json
+    )
+    assert (
+        len(summary["trials"]) == 6
+        and [t["status"] for t in summary["trials"]].count("failed") == 2
+    )
+    assert summary["best"]["params"] == {"lr0": 0.01, "augment.mosaic": 1.0} and summary["best"][
+        "objective"
+    ] == pytest.approx(0.57)
+    assert summary["weights"].endswith("trials/4/best.pt")
+    assert all(
+        trial["epochs"] == 5 and trial["augment"]["preset"] == "ballet-studio" for trial in seen
+    )
+    assert (
+        "search" not in seen[0]
+        and json.loads((tmp_path / "progress.json").read_text())["total"] == 6
+    )

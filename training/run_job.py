@@ -1,4 +1,4 @@
-"""Run one lab job (train, validate or export) described by a JSON file.
+"""Run one lab job (train, validate, export or tune) described by a JSON file.
 
 Started by the lab API (``app/lab/jobs.py``) in a separate process:
 
@@ -29,6 +29,9 @@ Train config (all keys optional except ``dataset_dir``):
       "val": {"conf": 0.001, "iou": 0.7},
       "export": null                # "onnx", "engine" (TensorRT), "openvino", ...
     }
+
+Tune config: a train config plus ``"kind": "tune"`` and a ``"search"`` (see
+``training/tuning.py``).
 """
 
 from __future__ import annotations
@@ -254,7 +257,14 @@ def run_val(config: dict, job_dir: Path, log) -> dict:
     }
 
 
-RUNNERS = {"train": run_train, "export": run_export, "val": run_val}
+def run_tune(config: dict, job_dir: Path, log) -> dict:
+    """Hyperparameter search: several short trainings (see ``training/tuning.py``)."""
+    from training.tuning import run_tune as search
+
+    return search(config, job_dir, log, train=run_train, write_json=write_json)
+
+
+RUNNERS = {"train": run_train, "export": run_export, "val": run_val, "tune": run_tune}
 
 
 def main(argv: list[str] | None = None) -> int:
