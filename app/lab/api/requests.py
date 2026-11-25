@@ -59,8 +59,28 @@ class PrelabelRequest(BaseModel):
     files: list[str] | None = None
 
 
+class SearchParameter(BaseModel):
+    """One hyperparameter to search: listed ``values`` (grid or random), or a range."""
+
+    key: str = Field(
+        min_length=1, description='A training option key, e.g. "lr0" or "augment.mosaic"'
+    )
+    values: list[Any] | None = None
+    min: float | None = None
+    max: float | None = None
+    log: bool = False  # draw on a log scale (learning rates)
+
+
+class TuneSearch(BaseModel):
+    strategy: Literal["grid", "random"] = "grid"
+    parameters: list[SearchParameter] = Field(min_length=1, max_length=6)
+    trials: int = Field(8, ge=1, le=30)
+    trial_epochs: int = Field(15, ge=1, le=300)
+    objective: Literal["pose.map50_95", "pose.map50", "box.map50_95", "box.map50"] = "box.map50_95"
+
+
 class JobRequest(BaseModel):
-    """A training, validation or export job.
+    """A training, validation, export or tuning (hyperparameter search) job.
 
     Training options (``options``, flat ``"loss.box": 7.5`` or nested) and any other
     field are passed to ``training/run_job.py`` unchanged.
@@ -68,10 +88,11 @@ class JobRequest(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    kind: Literal["train", "val", "export"] = "train"
+    kind: Literal["train", "val", "export", "tune"] = "train"
     name: str | None = None
     dataset: str | None = None
     weights: str | None = None
     base: str | None = None
     format: str | None = None
     options: dict[str, Any] | None = None
+    search: TuneSearch | None = None  # kind "tune": the hyperparameter search

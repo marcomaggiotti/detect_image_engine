@@ -326,7 +326,29 @@ GROUPS = [
 
 
 def options() -> dict:
-    return {"base_models": BASE_MODELS, "groups": GROUPS, "presets": PRESETS}
+    return {
+        "base_models": BASE_MODELS,
+        "groups": GROUPS,
+        "presets": PRESETS,
+        "tunable": sorted(tunable_options()),  # what a hyperparameter search may vary
+    }
+
+
+TUNABLE_KINDS = {"number", "bool", "choice"}
+# Not searched: set by the search (epochs), or they would make the trials incomparable
+# (another split, other validation thresholds) or do not change the training.
+NOT_TUNABLE = {"epochs", "seed", "export", "half", "split.val_fraction", "split.strategy",
+               "val.iou", "val.conf"}  # fmt: skip
+
+
+def tunable_options() -> dict[str, dict]:
+    """The options a hyperparameter search may vary, by key."""
+    return {
+        option["key"]: option
+        for group in GROUPS
+        for option in group["options"]
+        if option["kind"] in TUNABLE_KINDS and option["key"] not in NOT_TUNABLE
+    }
 
 
 def nest(flat: dict) -> dict:
